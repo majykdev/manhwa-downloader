@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Asura Scans → PDF</title>
+  <style>
+    :root {
+      --bg: #13111a;
+      --panel: #1c1924;
+      --panel-2: #24212b;
+      --accent: #913fe2;
+      --accent-2: #a78bfa;
+      --text: #f5f3f7;
+      --muted: #a79fb3;
+      --ok: #34d399;
+      --warn: #fbbf24;
+      --err: #f87171;
+      --border: rgba(255, 255, 255, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 50% -100px, rgba(145, 63, 226, 0.18), transparent),
+                  var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      width: 100%;
+      max-width: 640px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 30px 60px -30px rgba(0, 0, 0, 0.8);
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 22px;
+      font-weight: 700;
+    }
+    p.sub {
+      margin: 0 0 24px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    form { display: flex; gap: 10px; }
+    input[type="url"] {
+      flex: 1;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      padding: 12px 14px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input[type="url"]:focus { border-color: var(--accent); }
+    button {
+      background: var(--accent);
+      border: none;
+      border-radius: 10px;
+      color: #fff;
+      font-weight: 600;
+      font-size: 14px;
+      padding: 12px 20px;
+      cursor: pointer;
+      transition: filter 0.15s;
+    }
+    button:hover { filter: brightness(1.12); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .error { color: var(--err); font-size: 14px; margin-top: 14px; }
+    .progress-wrap { margin-top: 24px; }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .row b { color: var(--text); font-weight: 600; }
+    .bar {
+      height: 10px;
+      background: var(--panel-2);
+      border-radius: 999px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      transition: width 0.4s ease;
+      border-radius: 999px;
+    }
+    .stats { display: flex; gap: 18px; margin-top: 14px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+    .stats .badge { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel-2); }
+    .badge.ok { color: var(--ok); border-color: rgba(52, 211, 153, 0.3); }
+    .badge.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.3); }
+    .log {
+      margin-top: 16px;
+      max-height: 220px;
+      overflow-y: auto;
+      background: #100e15;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.7;
+      display: none;
+    }
+    .log div.warn { color: var(--warn); }
+    .log div.err { color: var(--err); }
+    .download {
+      margin-top: 20px;
+      text-align: center;
+    }
+    .download a {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--ok);
+      color: #06281a;
+      font-weight: 700;
+      padding: 14px 26px;
+      border-radius: 10px;
+      text-decoration: none;
+      font-size: 15px;
+    }
+    .chapter-list {
+      margin-top: 12px;
+      max-height: 320px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #100e15;
+    }
+    .ch-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 12px;
+      font-size: 13px;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      transition: background 0.15s;
+    }
+    .ch-row:last-child { border-bottom: none; }
+    .ch-row.active { background: rgba(145, 63, 226, 0.12); color: var(--text); }
+    .ch-num {
+      width: 80px;
+      flex-shrink: 0;
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--text);
+    }
+    .ch-bar {
+      flex: 1;
+      height: 4px;
+      background: var(--panel-2);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .ch-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      transition: width 0.4s ease;
+      border-radius: 999px;
+    }
+    .ch-status {
+      flex-shrink: 0;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .ch-status.pending { color: var(--muted); }
+    .ch-status.scraping { color: var(--accent-2); }
+    .ch-status.done { color: var(--ok); }
+    .ch-status.skipped { color: var(--err); }
+    .ch-status.locked { color: var(--warn); }
+    .hidden { display: none !important; }
+    .first-chapter { margin-top: 18px; }
+    .first-chapter form { display: flex; gap: 10px; }
+    .retry {
+      margin-top: 16px;
+      text-align: center;
+    }
+    .retry button {
+      background: var(--warn);
+      color: #3b2a04;
+      font-weight: 700;
+    }
+    .spin {
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.25);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      display: inline-block;
+      vertical-align: -2px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Asura Scans → PDF</h1>
+    <p class="sub">
+      Paste a manga or manhwa series/chapter link (Asura Scans, or any scanlation
+      site). The server scrapes every chapter, renders the pages into a single
+      PDF with a spacer page between chapters, and streams the finished file to
+      you.
+    </p>
+
+    <form id="scrape-form">
+      <input
+        id="url"
+        type="url"
+        placeholder="Insert comic link here"
+        autocomplete="off"
+        required
+      />
+      <button type="submit" id="start-btn">Start</button>
+    </form>
+    <div class="error hidden" id="error"></div>
+
+    <div class="first-chapter hidden" id="first-chapter">
+      <p class="sub">Couldn't find the first chapter. Paste the direct link to the first chapter below.</p>
+      <form id="first-chapter-form">
+        <input
+          id="first-chapter-url"
+          type="url"
+          placeholder="https://…/chapter/0"
+          autocomplete="off"
+          required
+        />
+        <button type="submit" id="first-chapter-btn">Continue</button>
+      </form>
+    </div>
+
+    <div class="progress-wrap hidden" id="progress">
+      <div class="row">
+        <span id="status-label">Queued…</span>
+        <span id="chapter-label"></span>
+      </div>
+      <div class="bar"><div class="bar-fill" id="bar-fill"></div></div>
+      <div class="stats" id="stats"></div>
+      <div class="chapter-list hidden" id="chapter-list"></div>
+      <div class="log" id="log"></div>
+    </div>
+
+    <div class="download hidden" id="download">
+      <a id="download-link" href="#">Download PDF</a>
+    </div>
+    <div class="retry hidden" id="retry">
+      <button type="button" id="retry-btn">Retry failed chapters</button>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
