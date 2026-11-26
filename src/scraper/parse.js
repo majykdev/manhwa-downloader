@@ -3,9 +3,10 @@
 const cheerio = require("cheerio");
 
 const ASURA_HOST = "asurascans.com";
+const ATSU_HOST = "atsu.moe";
 const IMAGE_PREFIX = "https://cdn.asurascans.com/asura-images/chapters/";
 const SERIES_PATHS = ["comics", "series", "manga", "reads", "read", "manhwa", "comic"];
-const CHAPTER_PATHS = ["chapter", "chap", "chapter", "c"];
+const CHAPTER_PATHS = ["chapter", "chap", "ch", "c"];
 
 const IMAGE_EXT = /\.(webp|jpe?g|png|avif|gif)(\?.*)?$/i;
 
@@ -55,6 +56,35 @@ function parseInputUrl(raw) {
       chapter,
       baseUrl: `https://${ASURA_HOST}/comics/${slug}`,
       sourceUrl: url.href,
+    };
+  }
+
+  const isAtsu = host === ATSU_HOST || host === "www." + ATSU_HOST;
+
+  if (isAtsu) {
+    const first = parts[0];
+    const idPattern = /^[A-Za-z0-9_-]+$/;
+    if (!first || !["manga", "novel", "read"].includes(first)) {
+      throw new Error("URL must look like https://atsu.moe/manga/{id} or https://atsu.moe/read/{id}/{chapterId}");
+    }
+    const mangaId = parts[1];
+    if (!idPattern.test(mangaId || "")) {
+      throw new Error(`Could not parse manga id from "${raw}".`);
+    }
+    const isNovel = first === "novel";
+    const isReader = first === "read" || (isNovel && parts.length > 2);
+    const chapterId = isReader ? parts[2] : null;
+    if (isReader && !idPattern.test(chapterId || "")) {
+      throw new Error(`Could not parse chapter id from "${raw}".`);
+    }
+    return {
+      kind: "atsu",
+      slug: mangaId,
+      chapterId,
+      medium: isNovel ? "Novel" : "Comic",
+      chapter: null,
+      baseUrl: `https://${ATSU_HOST}/${isNovel ? "novel" : "manga"}/${mangaId}`,
+      sourceUrl: `https://${ATSU_HOST}${url.pathname}`,
     };
   }
 

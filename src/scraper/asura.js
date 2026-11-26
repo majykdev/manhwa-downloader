@@ -7,7 +7,7 @@ const {
   parseSeriesInfo,
   isLockedPage,
 } = require("./parse");
-const { fetchWithRetry, fetchPageSmart, downloadBuffer } = require("./http");
+const { fetchPageSmart, downloadBuffer } = require("./http");
 
 const MAX_CHAPTERS = 5000;
 
@@ -19,11 +19,35 @@ function chapterUrl(slug, n) {
 }
 
 /**
+ * Resolve the numbered chapter range. Chapter 0 is an optional prologue: it is
+ * never the start of the count, and the actual chapter links win over the
+ * JSON-LD count (which assumes numbering from 0).
+ */
+function resolveChapterBounds(info, startChapter, endChapter = null) {
+  const links = (info.chapterNumbers || []).filter((n) => Number.isFinite(n));
+  const regular = links.filter((n) => n > 0);
+  const start = Number.isFinite(startChapter) && startChapter > 0 ? startChapter : null;
+
+  const firstChapter = start ?? (regular.length > 0 ? Math.min(...regular) : 1);
+
+  const candidates = [];
+  if (links.length > 0) candidates.push(Math.max(...links));
+  if (info.numberOfEpisodes != null) candidates.push(info.numberOfEpisodes - 1);
+  let lastChapter = candidates.length > 0 ? Math.max(...candidates) : null;
+
+  if (Number.isFinite(endChapter) && endChapter >= 0) {
+    lastChapter = lastChapter == null ? endChapter : Math.min(lastChapter, endChapter);
+  }
+
+  return { firstChapter, lastChapter };
+}
+
+/**
  * Discover the chapter range for a series by reading the series page.
  * Falls back to the smallest/largest chapter numbers found in its links,
  * then to walking rel="next" one chapter at a time.
  */
-async function discoverRange(slug, startChapter, onLog = () => {}) {
+async function discoverRange(slug, startChapter, onLog = () => {}, endChapter = null) {
   const baseUrl = `https://asurascans.com/comics/${slug}`;
   const res = await fetchPageSmart(baseUrl, { attempts: 2 });
   if (res.status === 404) {
@@ -34,19 +58,13 @@ async function discoverRange(slug, startChapter, onLog = () => {}) {
   const info = parseSeriesInfo(html);
   const title = info.title || slug;
 
-  let lastChapter = null;
-  if (info.numberOfEpisodes != null) {
-    lastChapter = info.numberOfEpisodes - 1;
-  } else if (info.chapterNumbers.length > 0) {
-    lastChapter = Math.max(...info.chapterNumbers);
-  }
+  let { firstChapter, lastChapter } = resolveChapterBounds(info, startChapter, endChapter);
 
   if (lastChapter == null) {
     onLog(`Chapter count not found on series page; walking rel="next" links…`);
-    lastChapter = await walkNext(slug, startChapter ?? 0, onLog);
+    lastChapter = await walkNext(slug, firstChapter, onLog);
   }
 
-  const firstChapter = startChapter ?? 0;
   if (firstChapter > lastChapter) {
     throw new InvalidChapterError(
       `Start chapter ${firstChapter} is past the last chapter (${lastChapter}).`,
@@ -87,11 +105,6 @@ function downloadImage(url, onRetry) {
   return downloadBuffer(url, { onRetry });
 }
 
-/** Fetch a chapter by explicit URL (unified path shared with generic sites). */
-function fetchChapterUrl(url) {
-  return fetchChapterFromUrl(url);
-}
-
 async function fetchChapterFromUrl(url) {
   const res = await fetchPageSmart(url, { attempts: 2 });
   if (res.status === 404) {
@@ -107,8 +120,8 @@ async function fetchChapterFromUrl(url) {
 
 module.exports = {
   discoverRange,
+  resolveChapterBounds,
   fetchChapter,
-  fetchChapterUrl,
   downloadImage,
   chapterUrl,
 };

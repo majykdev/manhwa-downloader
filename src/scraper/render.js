@@ -11,14 +11,10 @@ try {
   loadError = err;
 }
 
-const TA = "reader";
-
 let browserPromise = null;
 let lock = Promise.resolve();
 let idleTimer = null;
 let lastActive = 0;
-
-const IMAGE_ATTRS = ["currentSrc", "src", "data-src", "data-srcset", "data-lazy-src", "data-original"];
 
 /**
  * Async-mutexed section: concurrent tabs/jobs share one browser and render

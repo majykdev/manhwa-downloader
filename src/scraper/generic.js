@@ -13,7 +13,6 @@ const render = require("./render");
 const MAX_CHAPTERS = 5000;
 
 class NotFoundError extends Error {}
-class InvalidChapterError extends Error {}
 
 function toAbsolute(raw, base) {
   try {
@@ -339,6 +338,5 @@ module.exports = {
   collectCandidateLinks,
   renderPageSafe,
   NotFoundError,
-  InvalidChapterError,
   MAX_CHAPTERS,
 };

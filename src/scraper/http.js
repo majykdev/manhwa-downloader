@@ -111,4 +111,4 @@ async function fetchPageSmart(url, { attempts = 2, referer } = {}) {
   return { status: res.status, data: Buffer.from(res.data), headers: res.headers };
 }
 
-module.exports = { client, sleep, fetchWithRetry, downloadBuffer, fetchPageSmart, UA };
+module.exports = { client, fetchWithRetry, downloadBuffer, fetchPageSmart, UA };

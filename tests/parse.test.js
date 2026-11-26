@@ -46,6 +46,44 @@ test("parseInputUrl accepts non-Asura hosts as generic", () => {
   assert.strictEqual(parsed.kind, "generic");
 });
 
+test("parseInputUrl auto-detects atsu.moe manga and novel series", () => {
+  const manga = parseInputUrl("https://atsu.moe/manga/ehgv");
+  assert.strictEqual(manga.kind, "atsu");
+  assert.strictEqual(manga.slug, "ehgv");
+  assert.strictEqual(manga.medium, "Comic");
+  assert.strictEqual(manga.chapterId, null);
+  assert.strictEqual(manga.baseUrl, "https://atsu.moe/manga/ehgv");
+
+  const novel = parseInputUrl("https://www.atsu.moe/novel/abc123");
+  assert.strictEqual(novel.kind, "atsu");
+  assert.strictEqual(novel.medium, "Novel");
+  assert.strictEqual(novel.baseUrl, "https://atsu.moe/novel/abc123");
+});
+
+test("parseInputUrl auto-detects atsu.moe reader URLs", () => {
+  const read = parseInputUrl("https://atsu.moe/read/ehgv/aKF-UT");
+  assert.strictEqual(read.kind, "atsu");
+  assert.strictEqual(read.slug, "ehgv");
+  assert.strictEqual(read.chapterId, "aKF-UT");
+  assert.strictEqual(read.medium, "Comic");
+
+  const novel = parseInputUrl("https://atsu.moe/novel/abc123/ch-1");
+  assert.strictEqual(novel.kind, "atsu");
+  assert.strictEqual(novel.chapterId, "ch-1");
+  assert.strictEqual(novel.medium, "Novel");
+});
+
+test("parseInputUrl extracts chapter numbers from /ch/ and /chap/ URLs", () => {
+  assert.strictEqual(
+    parseInputUrl("https://flamescans.org/series/foo/ch/42").chapter,
+    42,
+  );
+  assert.strictEqual(
+    parseInputUrl("https://flamescans.org/series/foo/chap/43").chapter,
+    43,
+  );
+});
+
 test("parseInputUrl rejects garbage", () => {
   assert.throws(() => parseInputUrl("not a url"), /valid URL/);
   assert.throws(() => parseInputUrl("https://asurascans.com/whatever"), /comics/);
