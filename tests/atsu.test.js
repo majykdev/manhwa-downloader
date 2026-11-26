@@ -11,6 +11,8 @@ const {
   logicalChapters,
   parseReaderUrl,
   normaliseImage,
+  coverFromPageData,
+  isGeneratedOgCover,
 } = require("../src/scraper/atsu");
 
 function chapter(id, providerId, number, createdAt = 1) {
@@ -71,6 +73,19 @@ test("logicalChapters combines an integer chapter with its decimal parts", () =>
   assert.strictEqual(chapter40.combined, true);
   assert.deepStrictEqual(chapter40.parts.map((part) => part.number), [40, 40.5]);
   assert.strictEqual(logical.find((group) => group.number === 40.5), undefined);
+});
+
+test("logicalChapters filters excluded subchapter keys", () => {
+  const discovery = makeDiscovery();
+  const withoutPart = logicalChapters(discovery.chapters, { excludedPartKeys: ["40:40.5"] });
+  const chapter40 = withoutPart.find((group) => group.number === 40);
+  assert.ok(chapter40);
+  assert.notStrictEqual(chapter40.combined, true);
+  assert.strictEqual(chapter40.parts, undefined);
+
+  const withoutMain = logicalChapters(discovery.chapters, { excludedPartKeys: ["40:40"] });
+  assert.strictEqual(withoutMain.find((group) => group.number === 40), undefined);
+  assert.strictEqual(withoutMain.find((group) => group.number === 40.5).number, 40.5);
 });
 
 test("default selection uses the largest provider and fills its gaps", () => {
@@ -135,6 +150,15 @@ test("buildJobSpec applies a manual range to logical chapters", () => {
   assert.strictEqual(spec.chapterMeta[0].combined, true);
 });
 
+test("buildJobSpec exports only the main chapter when subchapters are excluded", () => {
+  const spec = buildJobSpec(makeDiscovery(), { excludedPartKeys: ["40:40.5"] });
+  const chapter40Index = spec.chapterMeta.findIndex((meta) => meta.number === 40);
+  assert.ok(chapter40Index >= 0);
+  assert.notStrictEqual(spec.chapterMeta[chapter40Index].combined, true);
+  assert.strictEqual(spec.chapterParts[chapter40Index], undefined);
+  assert.strictEqual(spec.chapterMeta.some((meta) => meta.number === 40.5), false);
+});
+
 test("reader URLs and CDN image paths normalize correctly", () => {
   assert.deepStrictEqual(parseReaderUrl("https://atsu.moe/read/ehgv/aKF-UT"), {
     mangaId: "ehgv",
@@ -149,5 +173,30 @@ test("reader URLs and CDN image paths normalize correctly", () => {
   assert.strictEqual(
     normaliseImage("https://cdn.atsu.moe/static/x.webp"),
     "https://cdn.atsu.moe/static/x.webp",
+  );
+  assert.strictEqual(
+    normaliseImage("posters/4GLmEEFwxnUYm4Xy-large.avif"),
+    "https://cdn.atsu.moe/static/posters/4GLmEEFwxnUYm4Xy-large.avif",
+  );
+});
+
+test("coverFromPageData prefers the JSON poster over generated OG covers", () => {
+  const pageData = {
+    mangaPage: {
+      poster: { largeImage: "posters/4GLmEEFwxnUYm4Xy-large.avif" },
+      cover: "https://atsu.moe/api/rs/og/series/iSeW.jpg?v=1",
+    },
+  };
+  assert.strictEqual(
+    coverFromPageData(pageData),
+    "https://cdn.atsu.moe/static/posters/4GLmEEFwxnUYm4Xy-large.avif",
+  );
+  assert.strictEqual(
+    isGeneratedOgCover("https://atsu.moe/api/rs/og/series/iSeW.jpg?v=1"),
+    true,
+  );
+  assert.strictEqual(
+    isGeneratedOgCover("https://cdn.atsu.moe/static/posters/4GLmEEFwxnUYm4Xy-large.avif"),
+    false,
   );
 });

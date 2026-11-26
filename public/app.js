@@ -31,6 +31,15 @@ const sourcesCancel = document.getElementById("sources-cancel");
 const sourcesStart = document.getElementById("sources-start");
 const sourceListBox = document.getElementById("source-list");
 const chapterSourceListBox = document.getElementById("chapter-source-list");
+const sourceControls = document.getElementById("source-controls");
+const reviewListBox = document.getElementById("review-list");
+const addChapterForm = document.getElementById("add-chapter-form");
+const addChapterUrlInput = document.getElementById("add-chapter-url");
+const addChapterNumberInput = document.getElementById("add-chapter-number");
+const addChapterBtn = document.getElementById("add-chapter-btn");
+const reviewCoverUrlInput = document.getElementById("review-cover-url");
+const coverApplyBtn = document.getElementById("cover-apply-btn");
+const coverApplyStatus = document.getElementById("cover-apply-status");
 
 const settingsBtn = document.getElementById("settings-btn");
 const settingsMenu = document.getElementById("settings-menu");
@@ -38,6 +47,7 @@ const settingsClose = document.getElementById("settings-close");
 const settingsApply = document.getElementById("settings-apply");
 const startChapterInput = document.getElementById("start-chapter");
 const endChapterInput = document.getElementById("end-chapter");
+const chapterHyperlinksToggle = document.getElementById("chapter-hyperlinks");
 const settingsModal = document.getElementById("settings-modal");
 const settingsModalConfirm = document.getElementById("settings-modal-confirm");
 const settingsModalCancel = document.getElementById("settings-modal-cancel");
@@ -48,6 +58,7 @@ const DEFAULT_SETTINGS = {
   endChapter: "",
   concurrency: "auto",
   delay: "auto",
+  chapterHyperlinks: true,
 };
 
 let settings = loadSettings();
@@ -58,7 +69,9 @@ let debugEventSource = null;
 let debugPollTimer = null;
 let pendingConcurrency = null;
 let pendingDiscovery = null;
+let reviewState = null;
 let sourceState = null;
+let addChapterNumberAutoFilled = false;
 let seenLogs = 0;
 let lastJobLogId = 0;
 let activeJobId = null;
@@ -69,10 +82,35 @@ const chapterRows = new Map();
 function show(el) { el.classList.remove("hidden"); }
 function hide(el) { el.classList.add("hidden"); }
 
+function fitSourceTitle() {
+  if (!sourcesTitle || sourcesTitle.clientWidth === 0) return;
+  sourcesTitle.style.fontSize = "";
+  for (const size of [14, 13, 12, 11]) {
+    sourcesTitle.style.fontSize = `${size}px`;
+    if (sourcesTitle.scrollWidth <= sourcesTitle.clientWidth) return;
+  }
+  sourcesTitle.style.fontSize = "11px";
+}
+
+function applyDetectedChapterNumber() {
+  const url = addChapterUrlInput.value.trim();
+  if (!url) {
+    if (addChapterNumberAutoFilled) addChapterNumberInput.value = "";
+    addChapterNumberAutoFilled = false;
+    return;
+  }
+  if (!addChapterNumberAutoFilled && addChapterNumberInput.value.trim() !== "") return;
+  const detected = extractReviewChapterNumber(url);
+  addChapterNumberInput.value = detected === null ? "" : String(detected);
+  addChapterNumberAutoFilled = detected !== null;
+}
+
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
-    return { ...DEFAULT_SETTINGS, ...saved };
+    const loaded = { ...DEFAULT_SETTINGS, ...saved };
+    loaded.chapterHyperlinks = loaded.chapterHyperlinks !== false;
+    return loaded;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -87,6 +125,7 @@ function saveSettings() {
 function renderSettings() {
   startChapterInput.value = draftSettings.startChapter ?? "";
   endChapterInput.value = draftSettings.endChapter ?? "";
+  chapterHyperlinksToggle.setAttribute("aria-checked", String(draftSettings.chapterHyperlinks !== false));
   for (const key of ["concurrency", "delay"]) {
     const value = String(draftSettings[key] ?? "auto");
     const label = document.getElementById(`${key}-value`);
@@ -213,6 +252,9 @@ settingsModalConfirm.addEventListener("click", (event) => {
 });
 startChapterInput.addEventListener("change", () => applySetting("startChapter", startChapterInput.value.trim()));
 endChapterInput.addEventListener("change", () => applySetting("endChapter", endChapterInput.value.trim()));
+chapterHyperlinksToggle.addEventListener("click", () => {
+  applySetting("chapterHyperlinks", chapterHyperlinksToggle.getAttribute("aria-checked") !== "true");
+});
 setupCustomSelect("concurrency");
 setupCustomSelect("delay");
 
@@ -278,6 +320,232 @@ function kindLabel(kind) {
   return "Generic site";
 }
 
+function isValidHttpUrl(value) {
+  try {
+    return /^https?:$/.test(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function setCoverApplyStatus(message, applied = false) {
+  coverApplyStatus.textContent = message;
+  coverApplyStatus.classList.toggle("applied", applied);
+}
+
+function applyCoverUrl() {
+  if (!reviewState) return;
+  const value = reviewCoverUrlInput.value.trim();
+  if (value && !isValidHttpUrl(value)) {
+    setError("Cover image URL must be a valid http(s) URL.");
+    setCoverApplyStatus("Invalid cover URL", false);
+    return;
+  }
+  clearError();
+  const detected = reviewState.detectedCoverUrl || "";
+  reviewState.appliedCoverUrl = value && value !== detected ? value : null;
+  if (value) {
+    setCoverApplyStatus(value === detected ? "Detected cover applied" : "Cover applied", true);
+  } else {
+    setCoverApplyStatus(detected ? "Using detected cover" : "No cover", Boolean(detected));
+  }
+}
+
+function extractReviewChapterNumber(url) {
+  try {
+    const path = new URL(url).pathname;
+    const patterns = [
+      /\/chapters?[/-](\d+(?:\.\d+)?)/i,
+      /\/chap(?:ter)?[/-](\d+(?:\.\d+)?)/i,
+      /\/c\/(\d+(?:\.\d+)?)/i,
+      /\/episodes?[/-](\d+(?:\.\d+)?)/i,
+      /(\d+(?:\.\d+)?)\/?$/,
+    ];
+    for (const pattern of patterns) {
+      const match = path.match(pattern);
+      if (match) return Number(match[1]);
+    }
+  } catch {}
+  return null;
+}
+
+function findReviewChapter(chapters, key) {
+  for (const chapter of chapters || []) {
+    if (chapter.key === key) return chapter;
+    const part = findReviewChapter(chapter.parts || [], key);
+    if (part) return part;
+  }
+  return null;
+}
+
+function isPartEnabled(key) {
+  return !sourceState || !sourceState.partEnabled.has(key) || sourceState.partEnabled.get(key) !== false;
+}
+
+function initializePartState(state) {
+  state.partEnabled = new Map();
+  state.disabledParts = new Set(state.defaults?.excludedPartKeys || []);
+  for (const chapter of state.chapters || []) {
+    for (const part of chapter.parts || []) {
+      state.partEnabled.set(part.key, !state.disabledParts.has(part.key));
+    }
+  }
+}
+
+function syncDisabledParts() {
+  const disabled = new Set();
+  for (const [key, enabled] of sourceState.partEnabled) {
+    if (!enabled) disabled.add(key);
+  }
+  sourceState.disabledParts = disabled;
+}
+
+function enforcePartSelection(recentKey) {
+  for (const group of sourceState.chapters || []) {
+    if (!group.parts || group.parts.length === 0) continue;
+    const enabled = group.parts.filter((part) => isPartEnabled(part.key));
+    if (enabled.length > 0) continue;
+    const main = group.parts.find((part) => Number(part.number) === Number(group.number));
+    const fallback = main || group.parts.find((part) => part.key === recentKey) || group.parts[0];
+    sourceState.partEnabled.set(fallback.key, true);
+  }
+}
+
+function renderReviewChapters() {
+  if (!reviewState) {
+    reviewListBox.innerHTML = "";
+    return;
+  }
+
+  const openKeys = new Set(
+    [...reviewListBox.querySelectorAll("details.review-parts[open]")].map((details) => details.dataset.key),
+  );
+  const rows = [];
+  const rowHtml = (chapter, part = false) => {
+    const url = chapter.customUrl || chapter.url || "";
+    const badge = chapter.added ? "Added" : chapter.customUrl ? "Custom" : "";
+    const enabled = part ? isPartEnabled(chapter.key) : true;
+    const toggle = part
+      ? `<label class="part-toggle"><input type="checkbox" data-part-toggle="${escapeHtml(chapter.key)}" ${enabled ? "checked" : ""} />Include</label>`
+      : "";
+    return `<div class="ch-row review-row${part ? " part" : ""}${part && !enabled ? " excluded" : ""}" data-key="${escapeHtml(chapter.key)}">
+      <span class="ch-num">${escapeHtml(chapter.label)}</span>
+      <span class="ch-provider">${escapeHtml(badge)}</span>
+      <span class="review-url${chapter.customUrl ? " custom" : ""}" title="${escapeHtml(url)}">${escapeHtml(url)}</span>
+      <span class="ch-status ready">Ready</span>
+      ${toggle}
+      <button type="button" class="ch-edit" data-key="${escapeHtml(chapter.key)}">Edit link</button>
+    </div>`;
+  };
+
+  for (const chapter of reviewState.chapters) {
+    rows.push(rowHtml(chapter));
+    const parts = chapter.parts || [];
+    if (parts.length === 0) continue;
+    const included = parts.filter((part) => isPartEnabled(part.key)).length;
+    rows.push(`<details class="review-parts" data-key="${escapeHtml(chapter.key)}"${openKeys.has(chapter.key) ? " open" : ""}>
+      <summary>Subchapters (${included}/${parts.length} included)</summary>
+      ${parts.map((part) => rowHtml(part, true)).join("")}
+    </details>`);
+  }
+
+  reviewListBox.innerHTML = rows.join("");
+  for (const button of reviewListBox.querySelectorAll(".ch-edit")) {
+    button.addEventListener("click", () => {
+      const row = button.closest(".review-row");
+      beginChapterEdit(button.dataset.key, row);
+    });
+  }
+  for (const input of reviewListBox.querySelectorAll("[data-part-toggle]")) {
+    input.addEventListener("change", () => {
+      if (!sourceState) return;
+      sourceState.partEnabled.set(input.dataset.partToggle, input.checked);
+      enforcePartSelection(input.dataset.partToggle);
+      syncDisabledParts();
+      renderReviewChapters();
+      renderChapterSourceList();
+    });
+  }
+}
+
+function beginChapterEdit(key, row) {
+  if (!reviewState || !row) return;
+  const chapter = findReviewChapter(reviewState.chapters, key);
+  if (!chapter) return;
+
+  const existing = reviewListBox.querySelector(".review-edit-form");
+  if (existing) existing.remove();
+
+  const form = document.createElement("form");
+  form.className = "review-edit-form";
+  form.innerHTML = `<input type="url" required autocomplete="off" value="${escapeHtml(chapter.customUrl || chapter.url || "")}" aria-label="Custom chapter URL" /><button type="submit">Save</button><button type="button" class="sources-cancel">Cancel</button>`;
+  const input = form.querySelector("input");
+  form.querySelector(".sources-cancel").addEventListener("click", () => form.remove());
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = input.value.trim();
+    if (!isValidHttpUrl(value)) {
+      setError("Chapter link must be a valid http(s) URL.");
+      input.focus();
+      return;
+    }
+    chapter.customUrl = value;
+    reviewState.overrides[key] = value;
+    clearError();
+    renderReviewChapters();
+  });
+  row.insertAdjacentElement("afterend", form);
+  input.focus();
+  input.select();
+}
+
+function addReviewChapter(event) {
+  event.preventDefault();
+  if (!reviewState) return;
+  clearError();
+
+  const url = addChapterUrlInput.value.trim();
+  if (!isValidHttpUrl(url)) {
+    setError("Chapter link must be a valid http(s) URL.");
+    addChapterUrlInput.focus();
+    return;
+  }
+
+  const manual = addChapterNumberInput.value.trim();
+  const number = manual === "" ? extractReviewChapterNumber(url) : Number(manual);
+  if (!Number.isFinite(number) || number < 0) {
+    setError("Could not find a chapter number. Enter one manually.");
+    addChapterNumberInput.focus();
+    return;
+  }
+
+  const key = number === 0 ? "0" : `added:${number}`;
+  if (findReviewChapter(reviewState.chapters, key)) {
+    setError(`Chapter ${number} is already listed. Use Edit link instead.`);
+    return;
+  }
+
+  reviewState.chapters.push({
+    key,
+    number,
+    label: number === 0 ? "Prologue" : `Chapter ${number}`,
+    url,
+    customUrl: url,
+    added: true,
+    combined: false,
+    parts: null,
+  });
+  reviewState.chapters.sort((a, b) => {
+    const an = Number.isFinite(Number(a.number)) ? Number(a.number) : Number.MAX_SAFE_INTEGER;
+    const bn = Number.isFinite(Number(b.number)) ? Number(b.number) : Number.MAX_SAFE_INTEGER;
+    return an - bn;
+  });
+  addChapterUrlInput.value = "";
+  addChapterNumberInput.value = "";
+  addChapterNumberAutoFilled = false;
+  renderReviewChapters();
+}
+
 function readChapterRange() {
   const parse = (value, label) => {
     if (value === undefined || value === null || String(value).trim() === "") return null;
@@ -302,6 +570,7 @@ function requestBody(extra = {}) {
     settings: {
       concurrency: settings.concurrency,
       delay: settings.delay,
+      chapterHyperlinks: settings.chapterHyperlinks !== false,
     },
     ...extra,
   };
@@ -342,7 +611,11 @@ function resetActivity() {
   hide(firstChapterBox);
   hide(sourcesPanel);
   hide(progressBox);
+  reviewListBox.innerHTML = "";
+  reviewCoverUrlInput.value = "";
+  setCoverApplyStatus("", false);
   pendingDiscovery = null;
+  reviewState = null;
   sourceState = null;
   stats.innerHTML = "";
   closeJobEvents();
@@ -524,9 +797,8 @@ async function startScrape(firstChapterUrl) {
     return;
   }
 
-  let handedOff = false;
   startBtn.disabled = true;
-  startBtn.textContent = "Detecting…";
+  startBtn.textContent = "Finding chapters…";
 
   try {
     const res = await fetch("/api/discover", {
@@ -543,24 +815,43 @@ async function startScrape(firstChapterUrl) {
     detectedKind.textContent = kindLabel(result.detectedKind);
     show(detectedBox);
 
-    if (!result.supported) {
-      handedOff = true;
-      startJob(body);
-      return;
+    pendingDiscovery = result;
+    const detectedCoverUrl = isValidHttpUrl(result.coverUrl || "") ? result.coverUrl : "";
+    reviewState = {
+      token: result.discoveryToken,
+      chapters: (result.chapters || []).map((chapter) => ({ ...chapter })),
+      overrides: {},
+      detectedCoverUrl,
+      appliedCoverUrl: null,
+    };
+    reviewCoverUrlInput.value = detectedCoverUrl;
+    setCoverApplyStatus(detectedCoverUrl ? "Detected cover applied" : "No cover found", Boolean(detectedCoverUrl));
+    for (const line of result.log || []) debugClient("info", `discovery: ${line}`);
+
+    if ((result.providers || []).length > 0) {
+      renderSources(result);
+      show(sourceControls);
+      show(sourcesAuto);
+    } else {
+      sourceState = null;
+      hide(sourceControls);
+      hide(sourcesAuto);
+      sourcesTitle.textContent = result.title || "this series";
+      sourcesSummary.textContent = `${reviewState.chapters.length} chapters found`;
     }
 
-    pendingDiscovery = result;
-    for (const line of result.log || []) debugClient("info", `discovery: ${line}`);
-    renderSources(result);
+    if (reviewState.chapters.length === 0) {
+      setError("No chapters found. Try a direct chapter link or add one manually.");
+    }
+    renderReviewChapters();
     show(sourcesPanel);
+    fitSourceTitle();
   } catch (err) {
     debugClient("error", `POST /api/discover: ${err.message}`);
-    setError("Network error while checking sources.");
+    setError("Network error while finding chapters.");
   } finally {
-    if (!handedOff) {
-      startBtn.disabled = false;
-      startBtn.textContent = "Start";
-    }
+    startBtn.disabled = false;
+    startBtn.textContent = "Find chapters";
   }
 }
 
@@ -590,7 +881,7 @@ async function startJob(payload) {
     setError("Network error while starting the job.");
   } finally {
     startBtn.disabled = false;
-    startBtn.textContent = "Start";
+    startBtn.textContent = "Find chapters";
   }
 }
 
@@ -719,8 +1010,10 @@ function renderSources(data) {
     overrides: { ...(data.defaults?.chapterOverrides || {}) },
     providers: new Map(data.providers.map((provider) => [provider.id, provider])),
     chapters: data.chapters || [],
+    defaults: data.defaults || {},
   };
-  sourcesTitle.textContent = `Sources for ${data.title || "this series"}`;
+  initializePartState(sourceState);
+  sourcesTitle.textContent = data.title || "this series";
   sourcesSummary.textContent = `${sourceState.chapters.length} chapters · ${data.providers.length} providers`;
   renderSourceList();
   renderChapterSourceList();
@@ -785,9 +1078,10 @@ function defaultProviderFor(group) {
   return group.options.find((option) => ids.includes(option.providerId))?.providerId || group.options[0]?.providerId || "";
 }
 
-function renderSourceSelect(group, prefix = "") {
+function renderSourceSelect(group, prefix = "", disabled = false) {
   const ids = orderedProviderIds();
-  const selected = sourceState.overrides[String(group.number)] ?? defaultProviderFor(group);
+  const key = group.key || String(group.number);
+  const selected = sourceState.overrides[key] ?? defaultProviderFor(group);
   const options = ids
     .map((id) => group.options.find((option) => option.providerId === id))
     .filter(Boolean)
@@ -799,9 +1093,9 @@ function renderSourceSelect(group, prefix = "") {
       return `<option value="${escapeHtml(option.providerId)}" ${option.providerId === selected ? "selected" : ""}>${escapeHtml(name + suffix)}</option>`;
     })
     .join("");
-  return `<div class="chapter-source-row">
+  return `<div class="chapter-source-row${disabled ? " disabled" : ""}">
     <span>${prefix}${group.number === 0 ? "Prologue" : `Ch. ${group.number}`}</span>
-    <select data-chapter="${escapeHtml(group.number)}">${optionHtml}</select>
+    <select data-chapter="${escapeHtml(key)}" ${disabled ? "disabled" : ""}>${optionHtml}</select>
   </div>`;
 }
 
@@ -810,8 +1104,10 @@ function renderChapterSourceList() {
   for (const group of sourceState.chapters) {
     if (group.combined) {
       const partsText = group.parts.map((part) => part.number).join(" + ");
-      html += `<div class="chapter-source-row"><span><b>Ch. ${group.number} (combined)</b> — ${escapeHtml(partsText)}</span><span></span></div>`;
-      for (const part of group.parts) html += renderSourceSelect(part, "↳ ");
+      html += `<div class="chapter-source-row combined-title"><span><b>Ch. ${group.number} (combined)</b> — ${escapeHtml(partsText)}</span></div>`;
+      for (const part of group.parts) {
+        html += renderSourceSelect(part, "↳ ", !isPartEnabled(part.key));
+      }
     } else {
       html += renderSourceSelect(group);
     }
@@ -869,33 +1165,85 @@ firstChapterForm.addEventListener("submit", (e) => {
   });
 });
 
+addChapterForm.addEventListener("submit", addReviewChapter);
+addChapterUrlInput.addEventListener("input", applyDetectedChapterNumber);
+addChapterNumberInput.addEventListener("input", () => {
+  addChapterNumberAutoFilled = false;
+});
+window.addEventListener("resize", fitSourceTitle);
+
+coverApplyBtn.addEventListener("click", applyCoverUrl);
+reviewCoverUrlInput.addEventListener("input", () => {
+  if (!reviewState) return;
+  if (errorBox.textContent.includes("Cover image URL")) clearError();
+  reviewState.appliedCoverUrl = null;
+  const value = reviewCoverUrlInput.value.trim();
+  const detected = reviewState.detectedCoverUrl || "";
+  if (value && value === detected) {
+    setCoverApplyStatus("Detected cover applied", true);
+  } else if (value) {
+    setCoverApplyStatus("Click Apply to use this URL", false);
+  } else {
+    setCoverApplyStatus(detected ? "Using detected cover" : "No cover", Boolean(detected));
+  }
+});
+
 sourcesAuto.addEventListener("click", () => {
-  if (!pendingDiscovery) return;
-  sourceState.order = [...(pendingDiscovery.defaults?.sourceOrder || [])];
-  sourceState.enabled = new Set(pendingDiscovery.defaults?.enabledSourceIds || []);
+  if (!pendingDiscovery || !sourceState) return;
+  const defaults = pendingDiscovery.defaults || {};
+  sourceState.order = [...(defaults.sourceOrder || [])];
+  sourceState.enabled = new Set(defaults.enabledSourceIds || []);
   sourceState.overrides = {};
+  sourceState.defaults = defaults;
+  initializePartState(sourceState);
   renderSourceList();
+  renderReviewChapters();
   renderChapterSourceList();
 });
 
 sourcesCancel.addEventListener("click", () => {
   hide(sourcesPanel);
+  hide(sourceControls);
+  hide(detectedBox);
+  reviewListBox.innerHTML = "";
+  reviewCoverUrlInput.value = "";
+  setCoverApplyStatus("", false);
+  urlInput.value = "";
   pendingDiscovery = null;
+  reviewState = null;
   sourceState = null;
   startBtn.disabled = false;
-  startBtn.textContent = "Start";
+  startBtn.textContent = "Find chapters";
 });
 
 sourcesStart.addEventListener("click", () => {
-  if (!sourceState) return;
+  if (!reviewState) return;
+  if (!reviewState.token) {
+    setError("This chapter preview expired. Search again.");
+    return;
+  }
+
   let payload;
   try {
-    payload = requestBody({
-      discoveryToken: sourceState.token,
-      sourceOrder: [...sourceState.order],
-      enabledSourceIds: [...sourceState.enabled],
-      chapterOverrides: { ...sourceState.overrides },
-    });
+    const extra = {
+      discoveryToken: reviewState.token,
+      chapterUrlOverrides: { ...reviewState.overrides },
+      addedChapters: reviewState.chapters
+        .filter((chapter) => chapter.added)
+        .map((chapter) => ({
+          number: chapter.number,
+          url: chapter.customUrl || chapter.url,
+          label: chapter.label,
+        })),
+      coverUrl: reviewState.appliedCoverUrl || reviewState.detectedCoverUrl || undefined,
+    };
+    if (sourceState) {
+      extra.sourceOrder = [...sourceState.order];
+      extra.enabledSourceIds = [...sourceState.enabled];
+      extra.chapterOverrides = { ...sourceState.overrides };
+      extra.excludedPartKeys = [...sourceState.disabledParts];
+    }
+    payload = requestBody(extra);
   } catch (err) {
     setError(err.message);
     openSettings();

@@ -8,6 +8,7 @@ const ASURA_SELECTORS = [
 ];
 
 const ATSU_SELECTORS = [
+  "#root > div.min-h-dvh.grid.grid-cols-1.pt-safe.max-md\\:pb-safe-bottom-nav > div.contents > div > div.w-full.min-w-0.max-w-\\(--wrapper\\).px-\\(--padding\\).mx-auto.max-md\\:px-0\\! > article > aside > div.relative.bg-cover.aspect-215\\/323.rounded-md > img",
   "#root > div.min-h-dvh.grid.grid-cols-1.pt-safe.max-md\\:pb-safe-bottom-nav > div:nth-child(8) > div.w-full.min-w-0.max-w-\\(--wrapper\\).px-\\(--padding\\).mx-auto.max-md\\:px-0\\! > article > aside > div.relative.bg-cover.aspect-215\\/323.rounded-md > img",
   "article aside img",
 ];
@@ -136,7 +137,7 @@ function scanGenericImages($, base) {
   return candidates[0] ? candidates[0].url : null;
 }
 
-function extractCoverUrl(html, { kind, baseUrl } = {}) {
+function extractCoverUrl(html, { kind, baseUrl, allowMeta = true } = {}) {
   if (typeof html !== "string" || html.length === 0) return null;
   const $ = cheerio.load(html);
   const base = baseUrl || null;
@@ -147,14 +148,22 @@ function extractCoverUrl(html, { kind, baseUrl } = {}) {
   if (specificUrl) return specificUrl;
 
   if (kind === "generic") {
-    const metaUrl = firstFromSelectors($, META_SELECTORS, base);
-    if (metaUrl) return metaUrl;
+    if (allowMeta) {
+      const metaUrl = firstFromSelectors($, META_SELECTORS, base);
+      if (metaUrl) return metaUrl;
+    }
     const structuredUrl = jsonLdImage($, base);
     if (structuredUrl) return structuredUrl;
     return scanGenericImages($, base);
   }
 
-  return firstFromSelectors($, META_SELECTORS, base);
+  return allowMeta ? firstFromSelectors($, META_SELECTORS, base) : null;
+}
+
+function extractMetaCoverUrl(html, { baseUrl } = {}) {
+  if (typeof html !== "string" || html.length === 0) return null;
+  const $ = cheerio.load(html);
+  return firstFromSelectors($, META_SELECTORS, baseUrl || null);
 }
 
 function seriesPageUrl(raw) {
@@ -176,4 +185,4 @@ function seriesPageUrl(raw) {
   }
 }
 
-module.exports = { extractCoverUrl, seriesPageUrl };
+module.exports = { extractCoverUrl, extractMetaCoverUrl, seriesPageUrl };

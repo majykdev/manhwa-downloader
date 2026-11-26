@@ -8,6 +8,7 @@ const config = require("../config");
 const asura = require("../scraper/asura");
 const atsu = require("../scraper/atsu");
 const generic = require("../scraper/generic");
+const { parseInputUrl } = require("../scraper/parse");
 const { PdfBuilder } = require("../pdf/builder");
 const {
   SpeedController,
@@ -45,7 +46,11 @@ async function runJob(store, job, { retry = false } = {}) {
   try {
     if (!retry) {
       store.setPhase(job, "discovering");
-      if (job.kind === "generic" || job.kind === "atsu") {
+      if (
+        job.kind === "generic" ||
+        job.kind === "atsu" ||
+        (job.kind === "asura" && Array.isArray(job.chapterUrls) && job.chapterUrls.length > 0)
+      ) {
         job.totalChapters = (job.chapterUrls || []).length;
         for (let i = 0; i < job.totalChapters; i++) {
           const meta = (job.chapterMeta || [])[i] || {};
@@ -189,7 +194,9 @@ async function processChapter(store, job, key, speed, handleFailure) {
 }
 
 async function buildPdf(store, job, pdfPath, { partial = false, doneOnly = false } = {}) {
-  const builder = new PdfBuilder(pdfPath);
+  const builder = new PdfBuilder(pdfPath, {
+    chapterHyperlinks: job.settings?.chapterHyperlinks !== false,
+  });
   let keys = regularChapterKeys(job);
   if (doneOnly) {
     keys = keys.filter(
@@ -248,7 +255,9 @@ async function buildPdf(store, job, pdfPath, { partial = false, doneOnly = false
         fs.readFileSync(path.join(job.tmpDir, "cover.meta.json"), "utf8"),
       );
     } catch {}
-    await builder.addCover(fs.readFileSync(coverPath), dimensions);
+    await builder.addCover(fs.readFileSync(coverPath), dimensions, {
+      contained: atsu.isGeneratedOgCover(job.coverUrl),
+    });
     coverPages = 1;
   }
 
@@ -262,35 +271,43 @@ async function buildPdf(store, job, pdfPath, { partial = false, doneOnly = false
   return { pages: totalPages, contents };
 }
 
+function fetchChapterByUrl(url) {
+  let kind = "generic";
+  try {
+    kind = parseInputUrl(url).kind;
+  } catch {}
+  if (kind === "asura") return asura.fetchChapterFromUrl(url);
+  if (kind === "atsu") return atsu.fetchChapter(url);
+  return generic.fetchChapter(url);
+}
+
 function fetchChap(job, key) {
-  if (job.kind === "generic") {
-    return generic.fetchChapter(job.chapterUrls[key]);
+  const parts = job.chapterParts && job.chapterParts[key];
+  if (Array.isArray(parts) && parts.length > 1) {
+    return fetchCombinedChapter(parts);
   }
-  if (job.kind === "atsu") {
-    const parts = job.chapterParts && job.chapterParts[key];
-    if (Array.isArray(parts) && parts.length > 1) {
-      return fetchCombinedAtsuChapter(parts);
-    }
-    return atsu.fetchChapter(job.chapterUrls[key]);
-  }
+  const url = job.chapterUrls && job.chapterUrls[key];
+  if (url) return fetchChapterByUrl(url);
   return asura.fetchChapter(job.slug, key);
 }
 
-async function fetchCombinedAtsuChapter(urls) {
+async function fetchCombinedChapter(urls) {
   const images = [];
   let locked = false;
   let blocked = false;
   let notFound = false;
   let title = null;
+  let rendered = false;
   for (const url of urls) {
-    const part = await atsu.fetchChapter(url);
+    const part = await fetchChapterByUrl(url);
     locked = locked || part.locked;
     blocked = blocked || part.blocked;
     notFound = notFound || part.notFound;
     title = title || part.title;
+    rendered = rendered || Boolean(part.rendered);
     images.push(...(part.images || []));
   }
-  return { images, locked, blocked, notFound, title, rendered: false };
+  return { images, locked, blocked, notFound, title, rendered };
 }
 
 async function downloadImages(store, job, key, images, label) {
@@ -304,7 +321,12 @@ async function downloadImages(store, job, key, images, label) {
     } catch (err) {
       const viaBrowser = generic.fetchViaBrowser
         ? await generic.fetchViaBrowser(url, {
-            referer: job.chapterUrls ? job.chapterUrls[key] : undefined,
+            referer:
+              label === "Prologue"
+                ? job.prologueUrl
+                : job.chapterUrls
+                  ? job.chapterUrls[key]
+                  : undefined,
           })
         : null;
       if (viaBrowser && viaBrowser.length > 0) {
@@ -380,17 +402,16 @@ async function prepareImage(buffer) {
 }
 
 async function fetchPrologue(store, job, dir, delayMs) {
-  if (job.hasPrologue || (job.kind !== "asura" && job.kind !== "atsu")) return;
-  if (job.kind === "atsu" && !job.prologueUrl) return;
+  if (job.hasPrologue) return;
+  const prologueUrl =
+    job.prologueUrl || (job.kind === "asura" ? asura.chapterUrl(job.slug, 0) : null);
+  if (!prologueUrl) return;
   const start = job.startChapter ?? job.firstChapter;
   if (Number.isFinite(start) && Number(start) > 0) return;
 
   let chap;
   try {
-    chap =
-      job.kind === "atsu"
-        ? await atsu.fetchChapter(job.prologueUrl)
-        : await asura.fetchChapter(job.slug, 0);
+    chap = await fetchChapterByUrl(prologueUrl);
   } catch (err) {
     store.pushLog(job, `Prologue: check failed (${err.status || err.code || "error"}) — skipping.`);
     if (delayMs > 0) await sleep(delayMs);

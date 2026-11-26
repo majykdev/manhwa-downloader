@@ -3,7 +3,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert");
 
-const { extractCoverUrl, seriesPageUrl } = require("../src/scraper/cover");
+const { extractCoverUrl, extractMetaCoverUrl, seriesPageUrl } = require("../src/scraper/cover");
 
 test("extractCoverUrl uses the Asura cover container selector", () => {
   const html = `
@@ -42,6 +42,48 @@ test("extractCoverUrl uses the Atsu series-page cover selector", () => {
   assert.strictEqual(
     extractCoverUrl(html, { kind: "atsu", baseUrl: "https://atsu.moe" }),
     "https://atsu.moe/static/covers/atsu.webp",
+  );
+});
+
+test("extractCoverUrl uses the rendered Atsu divider selector", () => {
+  const html = `
+    <div id="root">
+      <div class="min-h-dvh grid grid-cols-1 pt-safe max-md:pb-safe-bottom-nav">
+        <div class="contents">
+          <div>
+            <div class="w-full min-w-0 max-w-(--wrapper) px-(--padding) mx-auto max-md:px-0!">
+              <article>
+                <aside>
+                  <div class="relative bg-cover aspect-215/323 rounded-md">
+                    <img src="/static/covers/atsu-contents.webp" />
+                  </div>
+                </aside>
+              </article>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  assert.strictEqual(
+    extractCoverUrl(html, { kind: "atsu", baseUrl: "https://atsu.moe" }),
+    "https://atsu.moe/static/covers/atsu-contents.webp",
+  );
+});
+
+test("extractCoverUrl can skip metadata and extractMetaCoverUrl reads it", () => {
+  const html = `<meta property="og:image" content="https://atsu.moe/api/rs/og/series/iSeW.jpg?v=1" />`;
+  assert.strictEqual(
+    extractCoverUrl(html, {
+      kind: "atsu",
+      baseUrl: "https://atsu.moe/manga/iSeW",
+      allowMeta: false,
+    }),
+    null,
+  );
+  assert.strictEqual(
+    extractMetaCoverUrl(html, { baseUrl: "https://atsu.moe/manga/iSeW" }),
+    "https://atsu.moe/api/rs/og/series/iSeW.jpg?v=1",
   );
 });
 

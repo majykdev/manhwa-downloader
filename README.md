@@ -1,15 +1,15 @@
 # Manhwa Downloader
 
-Current release: **v0.9.1 beta 1** (`0.9.1-beta.1`).
+Current release: **v0.9.2 beta 2** (`0.9.2-beta.2`).
 
 A deployable web app that turns a manga/manhwa series into a single PDF. Asura
 Scans uses a fast numeric path, atsu.moe uses its public JSON API with selectable
 scanlation sources, and other scanlation sites use a generic scraper.
 
-Paste a series or chapter URL (e.g. `https://asurascans.com/comics/trash-of-the-counts-family-7e1f454a/chapter/0` or `https://atsu.moe/manga/Baxr`). The server:
+Paste a series or chapter URL (e.g. `https://asurascans.com/comics/trash-of-the-counts-family-7e1f454a/chapter/0` or `https://atsu.moe/manga/Baxr`) and click **Find chapters**. The UI shows every discovered chapter before scraping; each row can be edited to a custom URL from any supported site, and extra chapters can be added manually. The server:
 
-1. strips chapter segments to find the series/title page, discovers how many chapters exist, and finds the cover image,
-2. scrapes the chapter range you choose in Settings (blank bounds mean first/last),
+1. strips chapter segments to find the series/title page, discovers chapters and the cover image, and returns a short-lived preview token,
+2. scrapes the reviewed chapter list using the Settings range (blank bounds mean first/last),
 3. downloads all page images (WebP → JPEG) with adaptive concurrency/delay,
 4. renders everything into one streaming PDF with the **cover as the first page** and a **two-line spacer page between chapters** (e.g. `Chapter 37` / `Chapters 37.1 + 37.2` for Atsu split parts),
 5. streams the finished PDF back to you, with an on-demand partial PDF available while scraping.
@@ -35,13 +35,15 @@ To update an existing checkout to the latest GitHub `main`, double-click `update
 - The source site is auto-detected from the hostname — there is no provider toggle. Asura links use the numeric path, `atsu.moe` links use the Atsu adapter, everything else falls back to the generic scraper.
 - Static HTML is tried first (Asura chapter pages contain plain `<img>` tags pointing at the image CDN). For JS-heavy or Cloudflare-protected sites the server falls back to a Playwright-rendered page and, when needed, an optional TLS/HTTP2 impersonation client.
 - Atsu chapters come from `GET /api/manga/page` and `GET /api/manga/allChapters`; pages come from `GET /api/read/chapter` and `https://cdn.atsu.moe`. Multiple providers for the same chapter number are grouped. Decimal parts such as `37.1`/`37.2` are combined with chapter `37` into one logical chapter (even when one part is missing) and are rendered with a two-line spacer; no completeness warning is shown for split parts.
+- Initial discovery never starts a job automatically. Every provider returns a chapter list with a short-lived `discoveryToken` so the browser can show found chapters, Edit link buttons, Add chapter, and an optional cover image URL before export.
+- A custom chapter URL is detected per link (Asura/Atsu/generic), not by the series' original provider, so a row can be pointed at a mirror or another site. Added chapters get their number from the URL when possible and are inserted in numeric order.
 - Before starting an Atsu job the UI lets you enable/disable providers, reorder provider priority (chapter order stays numeric), and override the provider for an individual chapter or decimal part. If your selected providers do not cover a part, any remaining provider is used automatically; a chapter is only omitted when no source has any part.
-- The Settings gear exposes start/end chapter bounds plus custom concurrency and delay dropdowns. Bounds are chapter numbers (start `37` is chapter 37, not index 37); start `0` falls back to chapter 1 when there is no prologue, and a start >= 1 skips the prologue. An end above the last chapter exports everything from the start.
-- Auto speed starts at concurrency 4 / 400 ms, steps down on rate limits and retries, and slowly ramps the delay back up after sustained success. Manual high concurrency falls back to 1 chapter at a time when throttled. Settings are saved in `localStorage` only when **Apply** is clicked and sent with each job.
+- The Settings gear exposes start/end chapter bounds plus custom concurrency and delay dropdowns and a Chapter Hyperlinks toggle. Bounds are chapter numbers (start `37` is chapter 37, not index 37); start `0` falls back to chapter 1 when there is no prologue, and a start >= 1 skips the prologue. An end above the last chapter exports everything from the start.
+- Auto speed starts at concurrency 4 / 400 ms, steps down on rate limits and retries, and slowly ramps the delay back up after sustained success. Manual high concurrency falls back to 1 chapter at a time when throttled. Chapter Hyperlinks is enabled by default; turning it off keeps PDF table-of-contents labels but removes their clickable links. Settings are saved in `localStorage` only when **Apply** is clicked and sent with each job.
 - The numbered chapter range comes from the series page's chapter links, corrected against JSON-LD `numberOfEpisodes` (e.g. `186`), so both 0-based and 1-based series end on the newest chapter. If neither source exists it follows each page's `<link rel="next">`.
 - Chapter 0 is treated as an optional prologue: it is probed on every job and included (with a `Prologue` spacer) when it exists, but it is not counted in chapter numbers or totals. A missing chapter 0 is ignored without being reported as a skip. A manual start >= 1 skips the prologue probe entirely.
 - Premium/locked chapters (no page images + paywall markers) are skipped and reported in the progress log; the spacer still appears so chapter numbering in the PDF stays consistent.
-- The cover comes from the series/title page: Asura and Atsu use their specific cover selectors, while other sites use metadata/JSON-LD and cover-like images after chapter URL segments are removed. A found cover is rendered as PDF page 1; if it cannot be found or downloaded, the PDF is still built without it.
+- The cover comes from the series/title page or the optional cover URL entered during review: Asura and Atsu use their specific cover selectors, while other sites use metadata/JSON-LD and cover-like images after chapter URL segments are removed. A user-supplied cover URL wins over the auto-detected one. A found cover is rendered as PDF page 1; if it cannot be found or downloaded, the PDF is still built without it.
 - The PDF is written with `pdfkit` straight to disk, one prepared JPEG in memory at a time, so multi-thousand-page books won't exhaust the process memory. Finished jobs, their PDFs, and their temporary chapter images are all deleted after `JOB_TTL_MS` (default 1 h).
 - While a job is running, `/api/jobs/:id/download` builds a partial PDF on demand from chapters already marked done and pauses scraping until the response finishes. The final download is the complete PDF.
 - The UI has a small debug log at the bottom that shows server errors and chapter-pull failures. Job progress and debug entries are streamed over Server-Sent Events, with polling and `GET /api/debug/log` as fallbacks.
@@ -50,8 +52,8 @@ To update an existing checkout to the latest GitHub `main`, double-click `update
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/discover` | Body `{ "url": "...", "startChapter": 37, "endChapter": null, "settings": { "concurrency": "auto", "delay": "auto" } }` → detected kind. For Atsu, returns a short-lived `discoveryToken` plus providers/chapter options for logical chapters and decimal parts. |
-| `POST` | `/api/scrape` | Body `{ "url": "...", "firstChapterUrl": "...", "startChapter": null, "endChapter": null, "settings": {...} }` → `{ "jobId" }`, or `{ "discoveryToken": "...", "sourceOrder": [], "enabledSourceIds": [], "chapterOverrides": {} }`. Starts the job. Responds `422 NEED_FIRST_CHAPTER` when no chapter list is found and `400` when no chapter matches the range. |
+| `POST` | `/api/discover` | Body `{ "url": "...", "startChapter": 37, "endChapter": null, "settings": { "concurrency": "auto", "delay": "auto", "chapterHyperlinks": true } }` → detected kind plus a short-lived `discoveryToken`, chapter preview entries, cover URL, and Atsu providers/options for logical chapters and decimal parts. |
+| `POST` | `/api/scrape` | Body `{ "discoveryToken": "...", "chapterUrlOverrides": {}, "addedChapters": [{ "number": 58, "url": "..." }], "coverUrl": "...", "sourceOrder": [], "enabledSourceIds": [], "chapterOverrides": {}, "settings": {...} }` → `{ "jobId" }`. Starts the reviewed job. Also accepts the legacy direct-url body. Responds `422 NEED_FIRST_CHAPTER` when no chapter list is found and `400` when no chapter matches the range. |
 | `POST` | `/api/jobs/:id/retry` | Re-scrapes chapters that failed only at image download and rebuilds the PDF. |
 | `GET` | `/api/jobs/:id` | Job progress: phase, status, current/last chapter, completed count, pages, skips, log IDs, speed state, and download URL. |
 | `GET` | `/api/jobs/:id/events` | SSE stream of job snapshots. |

@@ -1,6 +1,6 @@
 {
   "name": "manhwa-downloader",
-  "version": "0.9.1-beta.1",
+  "version": "0.9.2-beta.2",
   "description": "Server-side manga/manhwa scraper that renders a series into a single PDF.",
   "type": "commonjs",
   "main": "src/server.js",

@@ -123,6 +123,7 @@ module.exports = {
   discoverRange,
   resolveChapterBounds,
   fetchChapter,
+  fetchChapterFromUrl,
   downloadImage,
   chapterUrl,
 };

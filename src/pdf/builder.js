@@ -45,9 +45,10 @@ function fittedFontSize(doc, text, maxWidth, start, min) {
 }
 
 class PdfBuilder {
-  constructor(outputPath, { maxPageWidth, jpegQuality, chapterPageSizeMode, compress } = {}) {
+  constructor(outputPath, { maxPageWidth, jpegQuality, chapterPageSizeMode, compress, chapterHyperlinks } = {}) {
     this.maxPageWidth = maxPageWidth || config.PDF_MAX_PAGE_WIDTH;
     this.jpegQuality = jpegQuality || config.PDF_JPEG_QUALITY;
+    this.chapterHyperlinks = chapterHyperlinks !== false;
     this.chapterPageSizeMode =
       chapterPageSizeMode || config.PDF_CHAPTER_PAGE_SIZE_MODE;
     this.pageCount = 0;
@@ -129,7 +130,7 @@ class PdfBuilder {
     return this.lastPageIndex();
   }
 
-  async addCover(buffer, dimensions = {}) {
+  async addCover(buffer, dimensions = {}, options = {}) {
     const image = sharp(buffer);
     const meta = await image.metadata();
     const width = Number(dimensions.width) || meta.width || this.maxPageWidth;
@@ -139,6 +140,23 @@ class PdfBuilder {
       .resize({ width: Math.min(width, this.maxPageWidth * 2) })
       .jpeg({ quality: this.jpegQuality })
       .toBuffer();
+
+    if (options.contained) {
+      const [pageW, pageH] = printerPageSize([width, height]);
+      const fit = containSize(width, height, Math.round(pageW * 0.8), Math.round(pageH * 0.55));
+      this.doc.addPage({ size: [pageW, pageH] });
+      this.doc.rect(0, 0, pageW, pageH).fill("#ffffff");
+      this.doc.image(jpeg, (pageW - fit.w) / 2, (pageH - fit.h) / 2, {
+        width: fit.w,
+        height: fit.h,
+      });
+      this.pageCount += 1;
+      const kids = this.doc._root.data.Pages.data.Kids;
+      const [page] = kids.splice(this.lastPageIndex(), 1);
+      kids.unshift(page);
+      return 0;
+    }
+
     const index = await this.addPreparedImage(jpeg, { width, height });
     const kids = this.doc._root.data.Pages.data.Kids;
     const [page] = kids.splice(index, 1);
@@ -208,13 +226,15 @@ class PdfBuilder {
         const row = i % rowsPerPage;
         const x = TOC_MARGIN_X + col * (colW + TOC_COL_GAP);
         const y = TOC_TOP + row * TOC_LINE_HEIGHT;
-        this.doc.font("Helvetica").fontSize(9.5).fillColor("#1d4ed8");
+        this.doc.font("Helvetica").fontSize(9.5).fillColor(this.chapterHyperlinks ? "#1d4ed8" : "#374151");
         this.doc.text(entry.label, x, y, {
           ellipsis: true,
           height: TOC_LINE_HEIGHT,
           width: colW,
         });
-        this.doc.link(x, y, colW, TOC_LINE_HEIGHT, entry.pageIndex);
+        if (this.chapterHyperlinks) {
+          this.doc.link(x, y, colW, TOC_LINE_HEIGHT, entry.pageIndex);
+        }
       });
       this.pageCount += 1;
     }

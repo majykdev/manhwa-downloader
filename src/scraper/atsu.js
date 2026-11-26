@@ -2,7 +2,7 @@
 
 const { fetchWithRetry, fetchPageSmart } = require("./http");
 const { inChapterRange } = require("../chapterRange");
-const { extractCoverUrl } = require("./cover");
+const { extractCoverUrl, extractMetaCoverUrl } = require("./cover");
 
 const ATSU_ORIGIN = "https://atsu.moe";
 const CDN_ORIGIN = "https://cdn.atsu.moe";
@@ -32,7 +32,32 @@ function normaliseImage(image) {
   if (/^https?:\/\//i.test(image)) return image;
   if (image.startsWith("/static/")) return CDN_ORIGIN + image;
   if (image.startsWith("static/")) return `${CDN_ORIGIN}/${image}`;
+  if (/^\/?posters\//i.test(image)) return `${CDN_ORIGIN}/static/${image.replace(/^\//, "")}`;
   return new URL(image, ATSU_ORIGIN).href;
+}
+
+function coverFromPageData(pageData) {
+  const manga = pageData?.mangaPage || pageData || {};
+  const poster = manga.poster || {};
+  return normaliseImage(
+    poster.largeImage ||
+      poster.mediumImage ||
+      poster.smallImage ||
+      poster.image ||
+      manga.cover ||
+      manga.coverUrl ||
+      manga.image ||
+      null,
+  );
+}
+
+function isGeneratedOgCover(url) {
+  try {
+    const parsed = new URL(url);
+    return /(^|\.)atsu\.moe$/i.test(parsed.hostname) && /^\/api\/rs\/og\/series\//.test(parsed.pathname);
+  } catch {
+    return false;
+  }
 }
 
 function readerUrl(mangaId, chapterId, medium) {
@@ -184,12 +209,16 @@ function resolveGroup(group, options, rank) {
   return { choice: null, source: "none" };
 }
 
-function logicalChapters(groups = []) {
+function logicalChapters(groups = [], options = {}) {
+  const excluded = options.excludedPartKeys == null
+    ? null
+    : new Set((options.excludedPartKeys || []).map(String));
   const byBase = new Map();
   for (const group of groups || []) {
     const number = Number(group.number);
     if (!Number.isFinite(number) || number < 0) continue;
     const base = Math.floor(number);
+    if (excluded && excluded.has(`${base}:${number}`)) continue;
     if (!byBase.has(base)) byBase.set(base, { base, integer: null, parts: [] });
     const entry = byBase.get(base);
     if (number === base) entry.integer = group;
@@ -254,7 +283,7 @@ function resolveSelectionGroup(group, options, rank) {
 
 function selectChapters(discovery, options = {}) {
   const rank = discovery.providers || [];
-  const groups = options.logicalGroups || logicalChapters(discovery.chapters);
+  const groups = options.logicalGroups || logicalChapters(discovery.chapters, options);
   const prologueGroup = groups.find((group) => group.number === 0 && !group.combined) || null;
   const regular = groups.filter((group) => group.number !== 0);
 
@@ -284,8 +313,8 @@ function buildJobSpec(discovery, options = {}) {
   };
   const hasRange = range.startChapter !== null || range.endChapter !== null;
   const logicalGroups = hasRange
-    ? logicalChapters(discovery.chapters).filter((group) => inChapterRange(group.number, range))
-    : logicalChapters(discovery.chapters);
+    ? logicalChapters(discovery.chapters, options).filter((group) => inChapterRange(group.number, range))
+    : logicalChapters(discovery.chapters, options);
   const selection = selectChapters(discovery, { ...options, logicalGroups });
   const chapterMeta = [];
   const chapterParts = {};
@@ -403,13 +432,9 @@ async function discoverSeries(parsed, firstChapterUrl, onLog = () => {}) {
       seriesHtml = htmlText(coverPage.data);
     }
     coverUrl =
-      extractCoverUrl(seriesHtml, { kind: "atsu", baseUrl: sourceUrl }) ||
-      normaliseImage(
-        pageData.mangaPage?.cover ||
-          pageData.mangaPage?.coverUrl ||
-          pageData.mangaPage?.image ||
-          null,
-      );
+      coverFromPageData(pageData) ||
+      extractCoverUrl(seriesHtml, { kind: "atsu", baseUrl: sourceUrl, allowMeta: false }) ||
+      extractMetaCoverUrl(seriesHtml, { baseUrl: sourceUrl });
   } catch {}
 
   let allData =
@@ -495,5 +520,7 @@ module.exports = {
   logicalChapters,
   parseReaderUrl,
   normaliseImage,
+  coverFromPageData,
+  isGeneratedOgCover,
   fetchChapter,
 };

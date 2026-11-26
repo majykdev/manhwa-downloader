@@ -5,6 +5,7 @@ const path = require("path");
 const express = require("express");
 const { parseInputUrl } = require("../scraper/parse");
 const generic = require("../scraper/generic");
+const asura = require("../scraper/asura");
 const atsu = require("../scraper/atsu");
 const { discoveryStore } = require("../jobs/discoveryStore");
 const { runJob, buildPdf } = require("../jobs/runner");
@@ -22,10 +23,23 @@ function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
+function normalizeBoolean(value, fallback) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1") return true;
+    if (normalized === "false" || normalized === "0") return false;
+  }
+  return fallback;
+}
+
 function requestOptions(body) {
   return {
     range: normalizeChapterRange(body),
-    settings: normalizeSpeedSettings(body.settings || {}),
+    settings: {
+      ...normalizeSpeedSettings(body.settings || {}),
+      chapterHyperlinks: normalizeBoolean(body.settings?.chapterHyperlinks, true),
+    },
   };
 }
 
@@ -42,42 +56,292 @@ function publicChapterOption(option) {
   };
 }
 
-function publicDiscovery(discovery, token, range) {
-  const groups = atsu
-    .logicalChapters(discovery.chapters)
-    .filter((group) => inChapterRange(group.number, range));
+function normalizeHttpUrl(value, label) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const url = new URL(value.trim());
+    if (!/^https?:$/.test(url.protocol)) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function chapterPreviewLabel(number) {
+  const n = Number(number);
+  if (n === 0) return "Prologue";
+  return Number.isFinite(n) ? `Chapter ${n}` : "Chapter";
+}
+
+function includePreviewGroup(group, range) {
+  const number = Number(group?.number);
+  if (!Number.isFinite(number) || number < 0) return false;
+  if (number === 0) return range.startChapter === null || range.startChapter === 0;
+  return inChapterRange(number, range, { logical: true });
+}
+
+function syntheticOption(kind, number, url) {
+  return {
+    providerId: kind,
+    providerName: kind === "asura" ? "Asura Scans" : "Direct",
+    chapterId: null,
+    number,
+    sourceNumber: number,
+    title: null,
+    pageCount: null,
+    url,
+  };
+}
+
+function simplePreview(key, number, url, label) {
+  return {
+    key,
+    number,
+    label: label || chapterPreviewLabel(number),
+    url,
+    combined: false,
+    parts: null,
+    options: [syntheticOption("generic", number, url)],
+  };
+}
+
+function makeAtasuPreview(discovery) {
+  const groups = atsu.logicalChapters(discovery.chapters || []);
+  return groups.map((group) => {
+    const parts = group.combined
+      ? group.parts.map((part) => ({
+          ...part,
+          key: `${group.number}:${part.number}`,
+          label: chapterPreviewLabel(part.number),
+          url: part.options?.[0]?.url || null,
+          options: (part.options || []).map(publicChapterOption),
+        }))
+      : null;
+    return {
+      ...group,
+      key: String(group.number),
+      label: group.combined ? chapterPreviewLabel(group.number) : chapterPreviewLabel(group.number),
+      url: group.options?.[0]?.url || parts?.[0]?.url || null,
+      parts,
+      options: (group.options || []).map(publicChapterOption),
+    };
+  });
+}
+
+function makeGenericPreview(discovery) {
+  return (discovery.chapters || []).map((chapter, index) => {
+    const number = Number.isFinite(chapter.num) ? chapter.num : null;
+    return simplePreview(
+      number === null ? `chapter:${index}` : String(number),
+      number,
+      chapter.url,
+      number === null ? `Chapter ${index + 1}` : chapterPreviewLabel(number),
+    );
+  });
+}
+
+function makeAsuraPreview(discovery, parsed) {
+  const chapters = [
+    simplePreview("0", 0, asura.chapterUrl(parsed.slug, 0), "Prologue"),
+  ];
+  const first = Number(discovery.firstChapter);
+  const last = Math.min(Number(discovery.lastChapter) || first, 5000);
+  for (let number = first; Number.isFinite(number) && number <= last; number += 1) {
+    chapters.push(simplePreview(String(number), number, asura.chapterUrl(parsed.slug, number)));
+  }
+  return chapters;
+}
+
+function publicPreviewGroup(group) {
+  const preview = {
+    key: group.key || String(group.number),
+    number: group.number,
+    label: group.label || chapterPreviewLabel(group.number),
+    url: group.url || group.options?.[0]?.url || null,
+    combined: Boolean(group.combined),
+    options: (group.options || []).map(publicChapterOption),
+  };
+  if (group.combined) {
+    preview.parts = (group.parts || []).map((part) => publicPreviewGroup(part));
+  }
+  return preview;
+}
+
+function publicDiscovery(discovery, token) {
+  const chapters = (discovery.chapters || [])
+    .filter((group) => includePreviewGroup(group, discovery.requestedRange || {}))
+    .map(publicPreviewGroup);
 
   return {
     supported: true,
-    detectedKind: "atsu",
+    detectedKind: discovery.kind,
     discoveryToken: token,
     title: discovery.title,
-    medium: discovery.medium,
-    providers: discovery.providers.map((provider) => ({ ...provider })),
-    chapters: groups.map((group) => {
-      if (group.combined) {
-        return {
-          number: group.number,
-          combined: true,
-          parts: group.parts.map((part) => ({
-            number: part.number,
-            options: part.options.map(publicChapterOption),
-          })),
-          options: group.options.map(publicChapterOption),
-        };
-      }
-      return {
-        number: group.number,
-        options: group.options.map(publicChapterOption),
-      };
-    }),
-    defaults: {
-      sourceOrder: discovery.providers.map((provider) => provider.id),
-      enabledSourceIds: discovery.providers.map((provider) => provider.id),
-      chapterOverrides: {},
-    },
+    coverUrl: discovery.coverUrl || null,
+    medium: discovery.medium || null,
+    providers: (discovery.providers || []).map((provider) => ({ ...provider })),
+    chapters,
+      defaults: {
+        sourceOrder: (discovery.providers || []).map((provider) => provider.id),
+        enabledSourceIds: (discovery.providers || []).map((provider) => provider.id),
+        chapterOverrides: {},
+        excludedPartKeys: [],
+      },
     log: discovery.log || [],
   };
+}
+
+function normalizeChapterEdits(body, range) {
+  const rawOverrides = body?.chapterUrlOverrides;
+  if (rawOverrides != null && (typeof rawOverrides !== "object" || Array.isArray(rawOverrides))) {
+    throw new Error("Chapter URL overrides must be an object.");
+  }
+  const overrides = {};
+  for (const [key, value] of Object.entries(rawOverrides || {})) {
+    const url = normalizeHttpUrl(value, `Chapter ${key}`);
+    if (!url) throw new Error(`Invalid custom chapter URL for "${key}".`);
+    overrides[String(key)] = url;
+  }
+
+  const rawAdded = body?.addedChapters;
+  if (rawAdded != null && !Array.isArray(rawAdded)) {
+    throw new Error("Added chapters must be a list.");
+  }
+  const added = [];
+  const seen = new Set();
+  for (const entry of rawAdded || []) {
+    const url = normalizeHttpUrl(entry?.url, "Added chapter");
+    if (!url) throw new Error("Added chapters need a valid http(s) URL.");
+    let number = Number(entry?.number);
+    if (!Number.isFinite(number) || number < 0) {
+      number = Number(generic.extractChapterNum(url));
+    }
+    if (!Number.isFinite(number) || number < 0) {
+      throw new Error("Could not find a chapter number in that URL.");
+    }
+    const key = String(number);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    added.push({
+      key: number === 0 ? "0" : `added:${number}`,
+      number,
+      label: entry?.label || chapterPreviewLabel(number),
+      url,
+    });
+  }
+
+  return {
+    overrides,
+    added: added.filter((chapter) => includePreviewGroup(chapter, range)),
+  };
+}
+
+function normalizeExcludedPartKeys(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("Excluded part keys must be a list.");
+  }
+  const keys = new Set();
+  for (const entry of value) {
+    if (typeof entry !== "string" || !/^\d+(?:\.\d+)?:\d+(?:\.\d+)?$/.test(entry)) {
+      throw new Error("Excluded part keys must look like \"2:2.5\".");
+    }
+    keys.add(entry);
+  }
+  return [...keys];
+}
+
+function buildPreviewJobSpec(discovery, edits, range) {
+  const chapters = (discovery.chapters || [])
+    .filter((chapter) => includePreviewGroup(chapter, range))
+    .filter((chapter) => Number(chapter.number) !== 0);
+  const byNumber = new Map();
+  for (const chapter of chapters) {
+    byNumber.set(String(chapter.number), { ...chapter });
+  }
+  for (const chapter of edits.added) {
+    if (Number(chapter.number) === 0) continue;
+    const key = String(chapter.number);
+    const existing = byNumber.get(key);
+    byNumber.set(key, existing ? { ...existing, url: chapter.url, label: chapter.label } : { ...chapter });
+  }
+
+  const final = [...byNumber.values()].sort((a, b) => Number(a.number) - Number(b.number));
+  const chapterUrls = [];
+  const chapterMeta = [];
+  for (const chapter of final) {
+    const override = edits.overrides[chapter.key] || edits.overrides[String(chapter.number)];
+    const url = override || chapter.url;
+    if (!url) continue;
+    chapterUrls.push(url);
+    chapterMeta.push({
+      number: Number.isFinite(Number(chapter.number)) ? Number(chapter.number) : undefined,
+      label: chapter.label || chapterPreviewLabel(chapter.number),
+      url,
+    });
+  }
+
+  const prologue = (discovery.chapters || []).find((chapter) => Number(chapter.number) === 0);
+  const addedPrologue = edits.added.find((chapter) => Number(chapter.number) === 0);
+  const prologueOverride = edits.overrides["0"] || edits.overrides[prologue?.key];
+  const prologueUrl = prologueOverride || addedPrologue?.url || prologue?.url || null;
+
+  return {
+    title: discovery.title,
+    coverUrl: discovery.coverUrl || null,
+    chapterUrls,
+    chapterMeta,
+    chapterParts: {},
+    prologueUrl,
+    log: [`Selected ${chapterMeta.length} chapters.`],
+  };
+}
+
+function applyEditsToAtsuSpec(spec, edits) {
+  for (let i = 0; i < spec.chapterUrls.length; i += 1) {
+    const meta = spec.chapterMeta[i] || {};
+    const number = meta.number;
+    const wholeOverride = edits.overrides[String(number)];
+    if (wholeOverride) {
+      spec.chapterUrls[i] = wholeOverride;
+      delete spec.chapterParts[i];
+      Object.assign(meta, {
+        label: chapterPreviewLabel(number),
+        detail: null,
+        parts: null,
+        partNumbers: null,
+        combined: false,
+      });
+      continue;
+    }
+    const parts = spec.chapterParts[i];
+    const partNumbers = meta.partNumbers || meta.parts || [];
+    if (Array.isArray(parts) && partNumbers.length > 0) {
+      for (let p = 0; p < partNumbers.length; p += 1) {
+        const override = edits.overrides[`${number}:${partNumbers[p]}`];
+        if (!override) continue;
+        parts[p] = override;
+        if (p === 0) spec.chapterUrls[i] = override;
+      }
+    }
+  }
+
+  for (const chapter of edits.added) {
+    if (Number(chapter.number) === 0) {
+      spec.prologueUrl = edits.overrides["0"] || chapter.url;
+      continue;
+    }
+    const override = edits.overrides[chapter.key];
+    spec.chapterUrls.push(override || chapter.url);
+    spec.chapterMeta.push({
+      number: chapter.number,
+      label: chapter.label || chapterPreviewLabel(chapter.number),
+      url: override || chapter.url,
+    });
+  }
+
+  if (edits.overrides["0"]) spec.prologueUrl = edits.overrides["0"];
+  return spec;
 }
 
 function createApiRouter(store) {
@@ -102,16 +366,31 @@ function createApiRouter(store) {
       } catch (err) {
         return res.status(400).json({ error: err.message });
       }
-      if (parsed.kind !== "atsu") {
-        return res.json({ supported: false, detectedKind: parsed.kind });
-      }
-
       const log = [];
       let discovery;
+      let chapters;
       try {
-        discovery = await atsu.discoverSeries(parsed, firstChapterUrl || null, (m) => log.push(m));
+        if (parsed.kind === "atsu") {
+          discovery = await atsu.discoverSeries(parsed, firstChapterUrl || null, (m) => log.push(m));
+          if (!discovery.needFirstChapter) chapters = makeAtasuPreview(discovery);
+        } else if (parsed.kind === "generic") {
+          discovery = await generic.discoverSeries(
+            parsed.sourceUrl,
+            firstChapterUrl || null,
+            (m) => log.push(m),
+          );
+          if (!discovery.needFirstChapter) chapters = makeGenericPreview(discovery);
+        } else {
+          discovery = await asura.discoverRange(
+            parsed.slug,
+            range.startChapter ?? null,
+            (m) => log.push(m),
+            range.endChapter ?? null,
+          );
+          chapters = makeAsuraPreview(discovery, parsed);
+        }
       } catch (err) {
-        debugLog("error", `Atsu discovery failed for ${parsed.sourceUrl}: ${err.message}`);
+        debugLog("error", `Discovery failed for ${parsed.sourceUrl}: ${err.message}`);
         return res.status(400).json({ error: err.message });
       }
       if (discovery.needFirstChapter) {
@@ -122,11 +401,25 @@ function createApiRouter(store) {
           log,
         });
       }
-      discovery.log = log;
-      discovery.requestedRange = range;
-      discovery.requestedSettings = settings;
-      const token = discoveryStore.create(discovery);
-      res.json(publicDiscovery(discovery, token, range));
+
+      const preview = {
+        kind: parsed.kind,
+        sourceUrl: parsed.kind === "asura" ? parsed.baseUrl : parsed.sourceUrl,
+        slug: parsed.slug || null,
+        mangaId: discovery.mangaId || parsed.slug || null,
+        medium: discovery.medium || null,
+        title: discovery.title || parsed.slug || "comic",
+        coverUrl: discovery.coverUrl || null,
+        firstChapterUrl: discovery.firstChapterUrl || firstChapterUrl || null,
+        chapters,
+        providers: discovery.providers || [],
+        raw: discovery,
+        log,
+        requestedRange: range,
+        requestedSettings: settings,
+      };
+      const token = discoveryStore.create(preview);
+      res.json(publicDiscovery(preview, token));
     }),
   );
 
@@ -144,41 +437,62 @@ function createApiRouter(store) {
       } catch (err) {
         return res.status(400).json({ error: err.message });
       }
+      const storedDiscovery = discoveryToken ? discoveryStore.get(discoveryToken) : null;
+      if (discoveryToken && !storedDiscovery) {
+        return res.status(400).json({ error: "Source selection expired. Search again." });
+      }
       const hasExplicitRange =
         body.startChapter !== undefined && body.startChapter !== null && body.startChapter !== "" ||
         body.endChapter !== undefined && body.endChapter !== null && body.endChapter !== "";
-      const effectiveRange = hasExplicitRange ? range : discoveryToken ? discoveryStore.get(discoveryToken)?.requestedRange || range : range;
+      const effectiveRange = hasExplicitRange ? range : storedDiscovery?.requestedRange || range;
+      const customCoverUrl = body.coverUrl ? normalizeHttpUrl(body.coverUrl, "Cover") : null;
+      if (body.coverUrl && !customCoverUrl) {
+        return res.status(400).json({ error: "Cover image URL must be http(s)." });
+      }
+      let edits;
+      let excludedPartKeys;
+      try {
+        edits = normalizeChapterEdits(body, effectiveRange);
+        excludedPartKeys = normalizeExcludedPartKeys(body.excludedPartKeys);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
       let job;
 
-      if (discoveryToken) {
-        const discovery = discoveryStore.get(discoveryToken);
-        if (!discovery) {
-          return res.status(400).json({ error: "Source selection expired. Search again." });
+      if (storedDiscovery) {
+        const discovery = storedDiscovery;
+        let spec;
+        if (discovery.kind === "atsu") {
+          spec = atsu.buildJobSpec(discovery, {
+            sourceOrder: body.sourceOrder,
+            enabledSourceIds: body.enabledSourceIds,
+            chapterOverrides: body.chapterOverrides,
+            excludedPartKeys,
+            ...effectiveRange,
+          });
+          applyEditsToAtsuSpec(spec, edits);
+        } else {
+          spec = buildPreviewJobSpec(discovery, edits, effectiveRange);
         }
-        const spec = atsu.buildJobSpec(discovery, {
-          sourceOrder: body.sourceOrder,
-          enabledSourceIds: body.enabledSourceIds,
-          chapterOverrides: body.chapterOverrides,
-          ...effectiveRange,
-        });
         if (spec.chapterUrls.length === 0) {
           return res.status(400).json({ error: "No chapters matched that range." });
         }
         job = store.create({
           url: discovery.sourceUrl,
-          kind: "atsu",
-          slug: discovery.mangaId,
+          kind: discovery.kind,
+          slug: discovery.kind === "asura" ? discovery.slug : discovery.mangaId,
           medium: discovery.medium,
           title: discovery.title,
-          coverUrl: spec.coverUrl || discovery.coverUrl || null,
+          coverUrl: customCoverUrl || spec.coverUrl || discovery.coverUrl || null,
           chapterUrls: spec.chapterUrls,
           chapterMeta: spec.chapterMeta,
-          chapterParts: spec.chapterParts,
+          chapterParts: spec.chapterParts || {},
           prologueUrl: spec.prologueUrl,
+          firstChapterUrl: discovery.firstChapterUrl || null,
           settings,
           startChapter: effectiveRange.startChapter,
           endChapter: effectiveRange.endChapter,
-          log: [...(discovery.log || []), ...spec.log],
+          log: [...(discovery.log || []), ...(spec.log || [])],
         });
       } else {
         let parsed;
@@ -217,7 +531,7 @@ function createApiRouter(store) {
             url: parsed.sourceUrl,
             kind: "generic",
             title: disc.title,
-            coverUrl: disc.coverUrl || null,
+            coverUrl: customCoverUrl || disc.coverUrl || null,
             chapterUrls: chapters.map((c) => c.url),
             chapterMeta: chapters.map((c) => ({
               number: Number.isFinite(c.num) ? c.num : undefined,
@@ -258,7 +572,7 @@ function createApiRouter(store) {
             slug: discovery.mangaId,
             medium: discovery.medium,
             title: discovery.title,
-            coverUrl: spec.coverUrl || discovery.coverUrl || null,
+            coverUrl: customCoverUrl || spec.coverUrl || discovery.coverUrl || null,
             chapterUrls: spec.chapterUrls,
             chapterMeta: spec.chapterMeta,
             chapterParts: spec.chapterParts,
@@ -274,6 +588,7 @@ function createApiRouter(store) {
             kind: "asura",
             slug: parsed.slug,
             firstChapter: parsed.chapter ?? null,
+            coverUrl: customCoverUrl || null,
             settings,
             startChapter: effectiveRange.startChapter,
             endChapter: effectiveRange.endChapter,
@@ -392,4 +707,13 @@ function createApiRouter(store) {
   return router;
 }
 
-module.exports = { createApiRouter };
+module.exports = {
+  createApiRouter,
+  publicDiscovery,
+  makeAsuraPreview,
+  makeGenericPreview,
+  normalizeChapterEdits,
+  normalizeExcludedPartKeys,
+  buildPreviewJobSpec,
+  applyEditsToAtsuSpec,
+};
