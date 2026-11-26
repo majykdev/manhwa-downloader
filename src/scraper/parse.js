@@ -1,6 +1,7 @@
 "use strict";
 
 const cheerio = require("cheerio");
+const { extractCoverUrl } = require("./cover");
 
 const ASURA_HOST = "asurascans.com";
 const ATSU_HOST = "atsu.moe";
@@ -267,7 +268,12 @@ function parseSeriesInfo(html) {
     if (m) chapterNumbers.add(Number.parseInt(m[1], 10));
   });
 
-  return { title, numberOfEpisodes, chapterNumbers: [...chapterNumbers] };
+  const coverUrl = extractCoverUrl(html, {
+    kind: "asura",
+    baseUrl: `https://${ASURA_HOST}`,
+  });
+
+  return { title, coverUrl, numberOfEpisodes, chapterNumbers: [...chapterNumbers] };
 }
 
 module.exports = {

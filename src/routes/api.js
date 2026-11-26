@@ -170,6 +170,7 @@ function createApiRouter(store) {
           slug: discovery.mangaId,
           medium: discovery.medium,
           title: discovery.title,
+          coverUrl: spec.coverUrl || discovery.coverUrl || null,
           chapterUrls: spec.chapterUrls,
           chapterMeta: spec.chapterMeta,
           chapterParts: spec.chapterParts,
@@ -216,6 +217,7 @@ function createApiRouter(store) {
             url: parsed.sourceUrl,
             kind: "generic",
             title: disc.title,
+            coverUrl: disc.coverUrl || null,
             chapterUrls: chapters.map((c) => c.url),
             chapterMeta: chapters.map((c) => ({
               number: Number.isFinite(c.num) ? c.num : undefined,
@@ -256,6 +258,7 @@ function createApiRouter(store) {
             slug: discovery.mangaId,
             medium: discovery.medium,
             title: discovery.title,
+            coverUrl: spec.coverUrl || discovery.coverUrl || null,
             chapterUrls: spec.chapterUrls,
             chapterMeta: spec.chapterMeta,
             chapterParts: spec.chapterParts,

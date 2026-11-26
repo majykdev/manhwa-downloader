@@ -112,6 +112,10 @@ test("parseSeriesInfo reads numberOfEpisodes + title from a real series page", (
   const info = parseSeriesInfo(seriesHtml);
   assert.strictEqual(info.numberOfEpisodes, 186);
   assert.ok(info.title && info.title.includes("Trash of the Count"));
+  assert.strictEqual(
+    info.coverUrl,
+    "https://cdn.asurascans.com/asura-images/covers/trash-of-the-counts-family.b543fa-400.webp",
+  );
   assert.strictEqual(info.chapterNumbers.length, 186);
   assert.ok(info.chapterNumbers.includes(0) && info.chapterNumbers.includes(185));
 });

@@ -41,6 +41,7 @@ function makeDiscovery() {
   const providers = rankProviders(chapters, scanlators);
   return {
     title: "Test Series",
+    coverUrl: "https://cdn.atsu.moe/static/covers/ehgv.webp",
     mangaId: "ehgv",
     medium: "Comic",
     providers,
@@ -113,6 +114,7 @@ test("chapterOverrides win over source order", () => {
 
 test("buildJobSpec produces reader URLs, combined chapters, and a prologue URL", () => {
   const spec = buildJobSpec(makeDiscovery(), {});
+  assert.strictEqual(spec.coverUrl, "https://cdn.atsu.moe/static/covers/ehgv.webp");
   assert.strictEqual(spec.chapterUrls.length, 57);
   assert.strictEqual(spec.chapterUrls[0], "https://atsu.moe/read/ehgv/a1");
   assert.strictEqual(spec.chapterUrls.at(-1), "https://atsu.moe/read/ehgv/b57");

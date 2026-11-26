@@ -52,6 +52,30 @@ test("printerPageSize uses printer-page proportions and fits inside the chapter 
   }
 });
 
+test("PdfBuilder puts the cover first without breaking TOC links", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "asura-cover-pdf-test-"));
+  const out = path.join(tmp, "out.pdf");
+  const cover = await makeWebp(300, 450, "rgb(30, 90, 180)");
+  const page = await makeWebp(200, 300, "rgb(180, 90, 30)");
+  const builder = new PdfBuilder(out, { compress: false });
+  const pageSize = await builder.measurePageSize(page);
+
+  const chapterIndex = builder.addSpacer("Chapter 1", pageSize);
+  await builder.addImage(page, pageSize);
+  builder.addTitlePage("Test Comic", [{ label: "Chapter 1", pageIndex: chapterIndex }]);
+  await builder.addCover(cover);
+  await builder.finish();
+
+  const coverSize = await builder.measurePageSize(cover);
+  assert.strictEqual(builder.pageCount, 4);
+  assert.strictEqual(countPdfPages(out), 4);
+  assert.deepStrictEqual(pageSizes(builder)[0], coverSize);
+
+  const kids = builder.doc._root.data.Pages.data.Kids;
+  assert.strictEqual(kids[1].data.Annots.length, 1);
+  assert.strictEqual(kids[1].data.Annots[0].data.A.data.D[0], kids[2]);
+});
+
 test("PdfBuilder writes a title page, clickable TOC, dividers, and image pages", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "asura-pdf-test-"));
   const out = path.join(tmp, "out.pdf");

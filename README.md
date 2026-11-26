@@ -8,10 +8,10 @@ scanlation sources, and other scanlation sites use a generic scraper.
 
 Paste a series or chapter URL (e.g. `https://asurascans.com/comics/trash-of-the-counts-family-7e1f454a/chapter/0` or `https://atsu.moe/manga/Baxr`). The server:
 
-1. strips `/chapter/N` to find the series page and discovers how many chapters exist,
+1. strips chapter segments to find the series/title page, discovers how many chapters exist, and finds the cover image,
 2. scrapes the chapter range you choose in Settings (blank bounds mean first/last),
 3. downloads all page images (WebP → JPEG) with adaptive concurrency/delay,
-4. renders everything into one streaming PDF with a **two-line spacer page between chapters** (e.g. `Chapter 37` / `Chapters 37.1 + 37.2` for Atsu split parts),
+4. renders everything into one streaming PDF with the **cover as the first page** and a **two-line spacer page between chapters** (e.g. `Chapter 37` / `Chapters 37.1 + 37.2` for Atsu split parts),
 5. streams the finished PDF back to you, with an on-demand partial PDF available while scraping.
 
 Everything runs **server-side** — the browser only ever talks to your app and downloads one finished PDF, so the source site's images never cross the user's connection (minimal bandwidth, no CORS issues).
@@ -41,6 +41,7 @@ To update an existing checkout to the latest GitHub `main`, double-click `update
 - The numbered chapter range comes from the series page's chapter links, corrected against JSON-LD `numberOfEpisodes` (e.g. `186`), so both 0-based and 1-based series end on the newest chapter. If neither source exists it follows each page's `<link rel="next">`.
 - Chapter 0 is treated as an optional prologue: it is probed on every job and included (with a `Prologue` spacer) when it exists, but it is not counted in chapter numbers or totals. A missing chapter 0 is ignored without being reported as a skip. A manual start >= 1 skips the prologue probe entirely.
 - Premium/locked chapters (no page images + paywall markers) are skipped and reported in the progress log; the spacer still appears so chapter numbering in the PDF stays consistent.
+- The cover comes from the series/title page: Asura and Atsu use their specific cover selectors, while other sites use metadata/JSON-LD and cover-like images after chapter URL segments are removed. A found cover is rendered as PDF page 1; if it cannot be found or downloaded, the PDF is still built without it.
 - The PDF is written with `pdfkit` straight to disk, one prepared JPEG in memory at a time, so multi-thousand-page books won't exhaust the process memory. Finished jobs, their PDFs, and their temporary chapter images are all deleted after `JOB_TTL_MS` (default 1 h).
 - While a job is running, `/api/jobs/:id/download` builds a partial PDF on demand from chapters already marked done and pauses scraping until the response finishes. The final download is the complete PDF.
 - The UI has a small debug log at the bottom that shows server errors and chapter-pull failures. Job progress and debug entries are streamed over Server-Sent Events, with polling and `GET /api/debug/log` as fallbacks.

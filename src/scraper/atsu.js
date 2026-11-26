@@ -2,6 +2,7 @@
 
 const { fetchWithRetry, fetchPageSmart } = require("./http");
 const { inChapterRange } = require("../chapterRange");
+const { extractCoverUrl } = require("./cover");
 
 const ATSU_ORIGIN = "https://atsu.moe";
 const CDN_ORIGIN = "https://cdn.atsu.moe";
@@ -52,6 +53,11 @@ function parseReaderUrl(raw) {
     }
   } catch {}
   return null;
+}
+
+function htmlText(data) {
+  if (Buffer.isBuffer(data)) return data.toString("utf8");
+  return typeof data === "string" ? data : "";
 }
 
 function extractMangaPage(html) {
@@ -348,6 +354,7 @@ function buildJobSpec(discovery, options = {}) {
     title: discovery.title,
     mangaId: discovery.mangaId,
     medium: discovery.medium,
+    coverUrl: discovery.coverUrl || null,
     chapterUrls,
     chapterMeta,
     chapterParts,
@@ -380,12 +387,30 @@ async function discoverSeries(parsed, firstChapterUrl, onLog = () => {}) {
 
   let pageData =
     (await fetchJsonSafe(`/api/manga/page?id=${encodeURIComponent(mangaId)}`)) || {};
+  let seriesHtml = "";
   if (!pageData.mangaPage) {
     onLog("Page API unavailable; trying the series page inline data.");
     const page = await fetchPageSmart(sourceUrl, { attempts: 2 });
-    pageData = extractMangaPage(page.data) || {};
+    seriesHtml = htmlText(page.data);
+    pageData = extractMangaPage(seriesHtml) || {};
     if (!pageData.mangaPage) log.push("Page API unavailable; inline data also missing.");
   }
+
+  let coverUrl = null;
+  try {
+    if (!seriesHtml) {
+      const coverPage = await fetchPageSmart(sourceUrl, { attempts: 2 });
+      seriesHtml = htmlText(coverPage.data);
+    }
+    coverUrl =
+      extractCoverUrl(seriesHtml, { kind: "atsu", baseUrl: sourceUrl }) ||
+      normaliseImage(
+        pageData.mangaPage?.cover ||
+          pageData.mangaPage?.coverUrl ||
+          pageData.mangaPage?.image ||
+          null,
+      );
+  } catch {}
 
   let allData =
     (await fetchJsonSafe(`/api/manga/allChapters?mangaId=${encodeURIComponent(mangaId)}`)) || {};
@@ -423,6 +448,7 @@ async function discoverSeries(parsed, firstChapterUrl, onLog = () => {}) {
     medium,
     sourceUrl,
     title: title || mangaId,
+    coverUrl,
     totalChapterCount: pageData.mangaPage?.totalChapterCount ?? groups.length,
     hasMoreChapters: Boolean(pageData.mangaPage?.hasMoreChapters),
     providers,

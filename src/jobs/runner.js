@@ -65,6 +65,7 @@ async function runJob(store, job, { retry = false } = {}) {
           job.endChapter ?? null,
         );
         job.title = info.title;
+        job.coverUrl = info.coverUrl || job.coverUrl || null;
         job.firstChapter = info.firstChapter;
         job.lastChapter = info.lastChapter;
         job.totalChapters = info.lastChapter - info.firstChapter + 1;
@@ -80,6 +81,8 @@ async function runJob(store, job, { retry = false } = {}) {
 
     pdfPath = path.join(dir, `${sanitizeFilename(job.title || job.slug || "comic")}.pdf`);
     job.pdfPath = pdfPath;
+
+    await prepareCover(store, job, dir);
 
     store.setPhase(job, "scraping");
     await fetchPrologue(store, job, dir, speed.delayMs());
@@ -235,13 +238,28 @@ async function buildPdf(store, job, pdfPath, { partial = false, doneOnly = false
   }
 
   builder.addTitlePage(job.title || job.slug || "comic", contents);
+
+  let coverPages = 0;
+  const coverPath = path.join(job.tmpDir, "cover.img");
+  if (fs.existsSync(coverPath)) {
+    let dimensions = {};
+    try {
+      dimensions = JSON.parse(
+        fs.readFileSync(path.join(job.tmpDir, "cover.meta.json"), "utf8"),
+      );
+    } catch {}
+    await builder.addCover(fs.readFileSync(coverPath), dimensions);
+    coverPages = 1;
+  }
+
   await builder.finish();
 
+  const totalPages = imagePages + coverPages;
   if (!partial) {
-    job.currentPage = imagePages;
-    job.pages = imagePages;
+    job.currentPage = totalPages;
+    job.pages = totalPages;
   }
-  return { pages: imagePages, contents };
+  return { pages: totalPages, contents };
 }
 
 function fetchChap(job, key) {
@@ -298,6 +316,53 @@ async function downloadImages(store, job, key, images, label) {
     }
     return prepareImage(buffer);
   });
+}
+
+async function prepareCover(store, job, dir) {
+  const coverPath = path.join(dir, "cover.img");
+  const metaPath = path.join(dir, "cover.meta.json");
+  if (fs.existsSync(coverPath)) {
+    job.coverPath = coverPath;
+    try {
+      job.coverDimensions = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+    } catch {
+      job.coverDimensions = null;
+    }
+    return;
+  }
+  if (!job.coverUrl) return;
+
+  let buffer;
+  try {
+    buffer = await asura.downloadImage(job.coverUrl, () =>
+      store.pushLog(job, "Cover: retrying image…"),
+    );
+  } catch (err) {
+    const viaBrowser = generic.fetchViaBrowser
+      ? await generic.fetchViaBrowser(job.coverUrl, { referer: job.url })
+      : null;
+    if (!viaBrowser || viaBrowser.length === 0) {
+      store.pushLog(
+        job,
+        `Cover: download failed (${err.status || err.code || "error"}) — continuing without cover.`,
+      );
+      return;
+    }
+    store.pushLog(job, "Cover: fetched via browser fallback.");
+    buffer = viaBrowser;
+  }
+
+  try {
+    const prepared = await prepareImage(buffer);
+    const dimensions = { width: prepared.width, height: prepared.height };
+    fs.writeFileSync(coverPath, prepared.buffer);
+    fs.writeFileSync(metaPath, JSON.stringify(dimensions));
+    job.coverPath = coverPath;
+    job.coverDimensions = dimensions;
+    store.pushLog(job, "Cover: added.");
+  } catch (err) {
+    store.pushLog(job, `Cover: prepare failed (${err.message}) — continuing without cover.`);
+  }
 }
 
 async function prepareImage(buffer) {

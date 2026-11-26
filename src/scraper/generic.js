@@ -8,6 +8,7 @@ const {
   isLockedPage,
 } = require("./parse");
 const { fetchWithRetry, fetchPageSmart } = require("./http");
+const { extractCoverUrl, seriesPageUrl } = require("./cover");
 const render = require("./render");
 
 const MAX_CHAPTERS = 5000;
@@ -20,6 +21,11 @@ function toAbsolute(raw, base) {
   } catch {
     return null;
   }
+}
+
+function htmlText(data) {
+  if (Buffer.isBuffer(data)) return data.toString("utf8");
+  return typeof data === "string" ? data : "";
 }
 
 function extractChapterNum(url) {
@@ -158,6 +164,26 @@ async function discoverSeries(inputUrl, chapterUrl = null, onLog = () => {}) {
     $('meta[property="og:site_name"]').attr("content") ||
     "Untitled";
 
+  const seriesUrl = seriesPageUrl(inputUrl) || inputUrl;
+  let renderedHtml = "";
+  let coverUrl = null;
+  if (seriesUrl === startUrl) {
+    coverUrl = extractCoverUrl(html, { kind: "generic", baseUrl: seriesUrl });
+  } else {
+    try {
+      const coverRes = await fetchPageSmart(seriesUrl, { attempts: 2 });
+      coverUrl = extractCoverUrl(htmlText(coverRes.data), { kind: "generic", baseUrl: seriesUrl });
+    } catch {}
+    if (!coverUrl && config.JS_RENDER_ENABLED && render.available) {
+      try {
+        const rendered = await renderPageSafe(seriesUrl);
+        if (!rendered.blocked && rendered.html) {
+          coverUrl = extractCoverUrl(rendered.html, { kind: "generic", baseUrl: seriesUrl });
+        }
+      } catch {}
+    }
+  }
+
   // Collect all chapter links on the page. First pass: structured selectors
   // (fast path). If they come up thin, fall back to scrubbing every anchor.
   // TODO(later): if both passes fail, probe the page's own code to learn how
@@ -203,6 +229,7 @@ async function discoverSeries(inputUrl, chapterUrl = null, onLog = () => {}) {
       onLog("No chapter links in static HTML — rendering page to look for them…");
       const out = await renderPageSafe(startUrl);
       if (!out.blocked && out.html) {
+        renderedHtml = out.html;
         const $r = cheerio.load(out.html);
         const scanned = collectCandidateLinks($r, startUrl);
         if (scanned.length > 0) {
@@ -213,6 +240,10 @@ async function discoverSeries(inputUrl, chapterUrl = null, onLog = () => {}) {
     }
   }
 
+  if (!coverUrl && renderedHtml) {
+    coverUrl = extractCoverUrl(renderedHtml, { kind: "generic", baseUrl: seriesUrl });
+  }
+
   if (candidates.length === 0) {
     // No chapter links at all: maybe a bare chapter page or a failed fetch.
     const num = extractChapterNum(startUrl);
@@ -220,17 +251,18 @@ async function discoverSeries(inputUrl, chapterUrl = null, onLog = () => {}) {
       onLog(`No chapter list found; walking rel="next" from ${startUrl}.`);
       const walked = await walkNext(startUrl, onLog);
       if (walked.length === 0) {
-        return { title, needFirstChapter: true };
+        return { title, coverUrl, needFirstChapter: true };
       }
       return {
         title,
+        coverUrl,
         firstChapterUrl: walked[0].url,
         chapters: walked,
         needFirstChapter: false,
       };
     }
     onLog(`No chapter links found on ${startUrl}; fetch a chapter page and retry.`);
-    return { title, needFirstChapter: true };
+    return { title, coverUrl, needFirstChapter: true };
   }
 
   // A chapter page only carries prev/next links; a series page carries many.
@@ -242,9 +274,10 @@ async function discoverSeries(inputUrl, chapterUrl = null, onLog = () => {}) {
     const dedup = new Map();
     for (const c of merged) dedup.set(c.url, c);
     const list = [...dedup.values()];
-    if (list.length === 0) return { title, needFirstChapter: true };
+    if (list.length === 0) return { title, coverUrl, needFirstChapter: true };
     return {
       title,
+      coverUrl,
       firstChapterUrl: list[0].url,
       chapters: list,
       needFirstChapter: false,
@@ -257,6 +290,7 @@ async function discoverSeries(inputUrl, chapterUrl = null, onLog = () => {}) {
 
   return {
     title,
+    coverUrl,
     firstChapterUrl: sorted[0].url,
     chapters: sorted,
     needFirstChapter: false,

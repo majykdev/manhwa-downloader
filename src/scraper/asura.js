@@ -57,6 +57,7 @@ async function discoverRange(slug, startChapter, onLog = () => {}, endChapter = 
   if (Buffer.isBuffer(html)) html = html.toString("utf8");
   const info = parseSeriesInfo(html);
   const title = info.title || slug;
+  const coverUrl = info.coverUrl || null;
 
   let { firstChapter, lastChapter } = resolveChapterBounds(info, startChapter, endChapter);
 
@@ -71,7 +72,7 @@ async function discoverRange(slug, startChapter, onLog = () => {}, endChapter = 
     );
   }
 
-  return { title, firstChapter, lastChapter };
+  return { title, coverUrl, firstChapter, lastChapter };
 }
 
 async function walkNext(slug, start, onLog) {

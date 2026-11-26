@@ -129,6 +129,23 @@ class PdfBuilder {
     return this.lastPageIndex();
   }
 
+  async addCover(buffer, dimensions = {}) {
+    const image = sharp(buffer);
+    const meta = await image.metadata();
+    const width = Number(dimensions.width) || meta.width || this.maxPageWidth;
+    const height = Number(dimensions.height) || meta.height || 1;
+    const jpeg = await image
+      .clone()
+      .resize({ width: Math.min(width, this.maxPageWidth * 2) })
+      .jpeg({ quality: this.jpegQuality })
+      .toBuffer();
+    const index = await this.addPreparedImage(jpeg, { width, height });
+    const kids = this.doc._root.data.Pages.data.Kids;
+    const [page] = kids.splice(index, 1);
+    kids.unshift(page);
+    return 0;
+  }
+
   addSpacer(label, pageSize, detail) {
     const [pageW, pageH] = printerPageSize(pageSize);
     const maxTextW = Math.max(40, pageW - 24);
