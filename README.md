@@ -98,53 +98,258 @@ npm test           # offline tests against saved HTML fixtures
 
 ## Features
 
-- **Source support**
-  - Auto-detects Asura Scans, atsu.moe, and generic sites from the URL hostname; there is no provider toggle.
-  - Asura links use the numeric chapter path and full-size viewer cover image, with `-400` thumbnail suffixes normalized before export.
-  - atsu.moe uses the public JSON API for manga info, chapter lists, providers, and reader pages.
-  - Other sites use the generic scraper, with source metadata, JSON-LD, and cover-like images used for discovery.
-  - Static HTML is tried first; JS-heavy or protected pages fall back to Playwright rendering and, when needed, an optional TLS/HTTP2 impersonation client.
-  - Server-side fetching avoids browser CORS issues and keeps source images off the user's connection.
+<details>
+<summary><strong>Source support</strong></summary>
 
-- **Review before export**
-  - Discovery returns a short-lived token and a complete chapter preview; no job starts automatically.
-  - Chapter rows can be edited to custom URLs, and each custom URL is detected as Asura, Atsu, or generic independently of the original series.
-  - Extra chapters can be added manually with numbers inferred from their URLs when possible, then inserted in numeric order.
-  - For atsu.moe, providers can be enabled/disabled and reordered, with per-chapter and per-part overrides. Missing selected parts fall back automatically to any available provider.
-  - Coverage is checked against chapter links and JSON-LD `numberOfEpisodes` or the page's `rel=next` chain, so 0-based and 1-based series both end at the newest chapter.
-  - Chapter 0 is an optional prologue: it is probed and included with a `Prologue` spacer when present, excluded from chapter counts, and skipped when a manual start is `>= 1`.
-  - Decimal Atsu parts such as `37.1` and `37.2` are combined with chapter `37` into one logical chapter, including when a part is missing.
-  - Premium or locked chapters with no page images are skipped and reported in the progress log while keeping the spacer so numbering stays consistent.
+<details>
+<summary>Site auto-detection</summary>
 
-- **Settings and shared throttling**
-  - Start/end chapter bounds are chapter numbers, not array indexes; blank bounds mean first/last, and an end above the last chapter exports through the end.
-  - Settings are per job/draft, not global. **Apply** commits them to the active draft and shows a green `✓ Applied!` state until the settings change or the panel is reopened.
-  - New jobs and refreshed sessions start from defaults; applied values stay with their draft, job, or archived record.
-  - **Chapter Hyperlinks** is enabled by default; turning it off keeps PDF table-of-contents labels but removes clickable links.
-  - Shared throttle profiles are **Safe**, **Balanced**, and **Fast**, with app-wide page limits and per-host image buckets so concurrent jobs do not hammer the same site.
-  - Speed can be Auto or manual. Auto starts conservatively, steps down on rate limits and retries, and slowly recovers; manual high concurrency falls back when throttled.
-  - Running jobs can be paused and resumed. Rate limits, retries, and cooldown state are reflected in the Jobs panel.
+Auto-detects Asura Scans, atsu.moe, and generic sites from the URL hostname; there is no provider toggle.
+</details>
 
-- **Jobs, drafts, and archive**
-  - Multiple jobs can be created with the `+` button and run in parallel; job rows show status, progress, and the absolute current/max chapter.
-  - Active jobs and editable drafts persist across browser refreshes through `sessionStorage`, and background jobs continue running.
-  - The progress bar appears only while a job is actively exporting.
-  - The `×` action pauses a running job before archiving it, or archives a finished/failed job directly; archiving the last job automatically creates a new blank draft.
-  - Downloading the final PDF from a job also archives it.
-  - The Archive section is collapsed by default and stores records in `localStorage`.
-  - Valid archives have a one-hour download window; expired archives offer **Rerun**.
-  - Clicking an archived job loads a fresh editable draft into the main card with its URL, settings, reviewed chapters, sources, cover, and saved progress details.
-  - Archive deletion uses a custom Cancel/Delete confirmation modal.
-  - The debug log shows server errors and chapter failures, streamed over Server-Sent Events with polling and `GET /api/debug/log` as fallbacks.
+<details>
+<summary>Asura cover URLs</summary>
 
-- **Covers and PDF output**
-  - A user-supplied cover URL always wins over auto-detection.
-  - Detected covers come from Asura/Atsu selectors or generic metadata; a found cover is rendered as PDF page 1, while a missing or failed cover falls back to a PDF without it.
-  - The PDF is written with `pdfkit` directly to disk, keeping only prepared images in memory so large books do not exhaust the process.
-  - Each chapter is preceded by a centered two-line spacer page, such as `Chapter 37` and `Chapters 37.1 + 37.2`, with text capped at 28pt/12pt and divider width matching the image width.
-  - PDF pages use phone-friendly dimensions by default, with `natural` or `first` chapter page-size modes and configurable JPEG quality.
-  - While a job is running, `/api/jobs/:id/download` builds a partial PDF from completed chapters and pauses scraping until the response finishes. The final download is the complete PDF.
-  - Finished jobs, PDFs, and temporary images are deleted after `JOB_TTL_MS` (default one hour).
+Asura links use the numeric chapter path and full-size viewer cover image, with `-400` thumbnail suffixes normalized before export.
+</details>
+
+<details>
+<summary>Atsu JSON API</summary>
+
+atsu.moe uses the public JSON API for manga info, chapter lists, providers, and reader pages.
+</details>
+
+<details>
+<summary>Generic scraper</summary>
+
+Other sites use the generic scraper, with source metadata, JSON-LD, and cover-like images used for discovery.
+</details>
+
+<details>
+<summary>Fallback renderers</summary>
+
+Static HTML is tried first; JS-heavy or protected pages fall back to Playwright rendering and, when needed, an optional TLS/HTTP2 impersonation client.
+</details>
+
+<details>
+<summary>Server-side fetch</summary>
+
+Server-side fetching avoids browser CORS issues and keeps source images off the user's connection.
+</details>
+
+</details>
+
+<details>
+<summary><strong>Review before export</strong></summary>
+
+<details>
+<summary>Preview tokens</summary>
+
+Discovery returns a short-lived token and a complete chapter preview; no job starts automatically.
+</details>
+
+<details>
+<summary>Editable chapters</summary>
+
+Chapter rows can be edited to custom URLs, and each custom URL is detected as Asura, Atsu, or generic independently of the original series.
+</details>
+
+<details>
+<summary>Added chapters</summary>
+
+Extra chapters can be added manually with numbers inferred from their URLs when possible, then inserted in numeric order.
+</details>
+
+<details>
+<summary>Provider selection</summary>
+
+For atsu.moe, providers can be enabled/disabled and reordered, with per-chapter and per-part overrides. Missing selected parts fall back automatically to any available provider.
+</details>
+
+<details>
+<summary>Chapter coverage</summary>
+
+Coverage is checked against chapter links and JSON-LD `numberOfEpisodes` or the page's `rel=next` chain, so 0-based and 1-based series both end at the newest chapter.
+</details>
+
+<details>
+<summary>Prologue handling</summary>
+
+Chapter 0 is an optional prologue: it is probed and included with a `Prologue` spacer when present, excluded from chapter counts, and skipped when a manual start is `>= 1`.
+</details>
+
+<details>
+<summary>Decimal parts</summary>
+
+Decimal Atsu parts such as `37.1` and `37.2` are combined with chapter `37` into one logical chapter, including when a part is missing.
+</details>
+
+<details>
+<summary>Locked chapters</summary>
+
+Premium or locked chapters with no page images are skipped and reported in the progress log while keeping the spacer so numbering stays consistent.
+</details>
+
+</details>
+
+<details>
+<summary><strong>Settings and shared throttling</strong></summary>
+
+<details>
+<summary>Chapter bounds</summary>
+
+Start/end chapter bounds are chapter numbers, not array indexes; blank bounds mean first/last, and an end above the last chapter exports through the end.
+</details>
+
+<details>
+<summary>Apply-only settings</summary>
+
+Settings are per job/draft, not global. **Apply** commits them to the active draft and shows a green `✓ Applied!` state until the settings change or the panel is reopened.
+</details>
+
+<details>
+<summary>Per-job settings</summary>
+
+New jobs and refreshed sessions start from defaults; applied values stay with their draft, job, or archived record.
+</details>
+
+<details>
+<summary>Hyperlinks toggle</summary>
+
+**Chapter Hyperlinks** is enabled by default; turning it off keeps PDF table-of-contents labels but removes clickable links.
+</details>
+
+<details>
+<summary>Throttle profiles</summary>
+
+Shared throttle profiles are **Safe**, **Balanced**, and **Fast**, with app-wide page limits and per-host image buckets so concurrent jobs do not hammer the same site.
+</details>
+
+<details>
+<summary>Adaptive speed</summary>
+
+Speed can be Auto or manual. Auto starts conservatively, steps down on rate limits and retries, and slowly recovers; manual high concurrency falls back when throttled.
+</details>
+
+<details>
+<summary>Pause and resume</summary>
+
+Running jobs can be paused and resumed. Rate limits, retries, and cooldown state are reflected in the Jobs panel.
+</details>
+
+</details>
+
+<details>
+<summary><strong>Jobs, drafts, and archive</strong></summary>
+
+<details>
+<summary>Parallel jobs</summary>
+
+Multiple jobs can be created with the `+` button and run in parallel; job rows show status, progress, and the absolute current/max chapter.
+</details>
+
+<details>
+<summary>Refresh persistence</summary>
+
+Active jobs and editable drafts persist across browser refreshes through `sessionStorage`, and background jobs continue running.
+</details>
+
+<details>
+<summary>Running progress</summary>
+
+The progress bar appears only while a job is actively exporting.
+</details>
+
+<details>
+<summary>Archive actions</summary>
+
+The `×` action pauses a running job before archiving it, or archives a finished/failed job directly; archiving the last job automatically creates a new blank draft.
+</details>
+
+<details>
+<summary>Auto archive</summary>
+
+Downloading the final PDF from a job also archives it.
+</details>
+
+<details>
+<summary>Archive storage</summary>
+
+The Archive section is collapsed by default and stores records in `localStorage`.
+</details>
+
+<details>
+<summary>Download window</summary>
+
+Valid archives have a one-hour download window; expired archives offer **Rerun**.
+</details>
+
+<details>
+<summary>Reload archive</summary>
+
+Clicking an archived job loads a fresh editable draft into the main card with its URL, settings, reviewed chapters, sources, cover, and saved progress details.
+</details>
+
+<details>
+<summary>Delete modal</summary>
+
+Archive deletion uses a custom Cancel/Delete confirmation modal.
+</details>
+
+<details>
+<summary>Debug log</summary>
+
+The debug log shows server errors and chapter failures, streamed over Server-Sent Events with polling and `GET /api/debug/log` as fallbacks.
+</details>
+
+</details>
+
+<details>
+<summary><strong>Covers and PDF output</strong></summary>
+
+<details>
+<summary>Custom covers</summary>
+
+A user-supplied cover URL always wins over auto-detection.
+</details>
+
+<details>
+<summary>Detected covers</summary>
+
+Detected covers come from Asura/Atsu selectors or generic metadata; a found cover is rendered as PDF page 1, while a missing or failed cover falls back to a PDF without it.
+</details>
+
+<details>
+<summary>Streaming PDF</summary>
+
+The PDF is written with `pdfkit` directly to disk, keeping only prepared images in memory so large books do not exhaust the process.
+</details>
+
+<details>
+<summary>Chapter spacers</summary>
+
+Each chapter is preceded by a centered two-line spacer page, such as `Chapter 37` and `Chapters 37.1 + 37.2`, with text capped at 28pt/12pt and divider width matching the image width.
+</details>
+
+<details>
+<summary>Page sizing</summary>
+
+PDF pages use phone-friendly dimensions by default, with `natural` or `first` chapter page-size modes and configurable JPEG quality.
+</details>
+
+<details>
+<summary>Partial PDF</summary>
+
+While a job is running, `/api/jobs/:id/download` builds a partial PDF from completed chapters and pauses scraping until the response finishes. The final download is the complete PDF.
+</details>
+
+<details>
+<summary>TTL cleanup</summary>
+
+Finished jobs, PDFs, and temporary images are deleted after `JOB_TTL_MS` (default one hour).
+</details>
+
+</details>
 
 ## Quick update
 
