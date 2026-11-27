@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { parseInputUrl } = require("../scraper/parse");
+const { normalizeCoverUrl } = require("../scraper/cover");
 const generic = require("../scraper/generic");
 const asura = require("../scraper/asura");
 const atsu = require("../scraper/atsu");
@@ -11,6 +12,7 @@ const { discoveryStore } = require("../jobs/discoveryStore");
 const { runJob, buildPdf } = require("../jobs/runner");
 const { normalizeChapterRange, inChapterRange } = require("../chapterRange");
 const { normalizeSpeedSettings } = require("../jobs/speedController");
+const { normalizeProfile } = require("../jobs/globalThrottle");
 const {
   debugLog,
   getDebugLog,
@@ -18,6 +20,7 @@ const {
   subscribe: subscribeDebug,
 } = require("../debug");
 const { sanitizeFilename } = require("../util");
+const { clearJobTempFiles } = require("../jobs/store");
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -38,6 +41,7 @@ function requestOptions(body) {
     range: normalizeChapterRange(body),
     settings: {
       ...normalizeSpeedSettings(body.settings || {}),
+      globalThrottleProfile: normalizeProfile(body.settings?.globalThrottleProfile),
       chapterHyperlinks: normalizeBoolean(body.settings?.chapterHyperlinks, true),
     },
   };
@@ -445,7 +449,9 @@ function createApiRouter(store) {
         body.startChapter !== undefined && body.startChapter !== null && body.startChapter !== "" ||
         body.endChapter !== undefined && body.endChapter !== null && body.endChapter !== "";
       const effectiveRange = hasExplicitRange ? range : storedDiscovery?.requestedRange || range;
-      const customCoverUrl = body.coverUrl ? normalizeHttpUrl(body.coverUrl, "Cover") : null;
+      const customCoverUrl = body.coverUrl
+        ? normalizeCoverUrl(normalizeHttpUrl(body.coverUrl, "Cover"))
+        : null;
       if (body.coverUrl && !customCoverUrl) {
         return res.status(400).json({ error: "Cover image URL must be http(s)." });
       }
@@ -609,6 +615,24 @@ function createApiRouter(store) {
       if (job.status !== "complete") {
         return res.status(409).json({ error: "Job has not finished yet." });
       }
+      if (job.tempCleaned) {
+        job.tempCleaned = false;
+        job.hasPrologue = false;
+        job.pages = 0;
+        job.currentPage = 0;
+        job.skipped = 0;
+        job.locked = 0;
+        for (const data of Object.values(job.chapters || {})) {
+          data.status = "pending";
+          data.pagesDone = 0;
+          data.pagesTotal = 0;
+          data.reason = null;
+        }
+        store.pushLog(job, "Rebuilding PDF from source after temp cleanup…");
+        setImmediate(() => runJob(store, job));
+        res.status(202).json({ jobId: job.id });
+        return;
+      }
       const retryable = store.findRetryable(job);
       if (retryable.length === 0) {
         return res.status(409).json({ error: "No chapters to retry." });
@@ -616,6 +640,34 @@ function createApiRouter(store) {
       store.pushLog(job, `Retrying ${retryable.length} chapter(s)…`);
       setImmediate(() => runJob(store, job, { retry: true }));
       res.status(202).json({ jobId: job.id });
+    }),
+  );
+
+  router.post(
+    "/jobs/:id/pause",
+    asyncHandler(async (req, res) => {
+      const job = store.get(req.params.id);
+      if (!job) return res.status(404).json({ error: "Job not found." });
+      if (job.status !== "running") {
+        return res.status(409).json({ error: "Only exporting jobs can be paused." });
+      }
+      if (!job.userPaused) store.pushLog(job, "Paused by user.");
+      store.setUserPause(job, true);
+      res.json(store.snapshot(job.id));
+    }),
+  );
+
+  router.post(
+    "/jobs/:id/resume",
+    asyncHandler(async (req, res) => {
+      const job = store.get(req.params.id);
+      if (!job) return res.status(404).json({ error: "Job not found." });
+      if (job.status !== "running" || !job.userPaused) {
+        return res.status(409).json({ error: "Job is not paused." });
+      }
+      store.setUserPause(job, false);
+      store.pushLog(job, "Resumed by user.");
+      res.json(store.snapshot(job.id));
     }),
   );
 
@@ -682,7 +734,9 @@ function createApiRouter(store) {
       if (job.status === "complete" && job.pdfPath && fs.existsSync(job.pdfPath)) {
         const filename = `${baseName}.pdf`;
         debugPdfDownloaded(job.id, job.title || job.slug || "comic", filename);
-        return res.download(job.pdfPath, filename);
+        return res.download(job.pdfPath, filename, (err) => {
+          if (!err) clearJobTempFiles(job);
+        });
       }
 
       const snap = store.snapshot(job.id);
@@ -697,7 +751,13 @@ function createApiRouter(store) {
         }
         const filename = `${baseName}-partial.pdf`;
         debugPdfDownloaded(job.id, job.title || job.slug || "comic", filename);
-        return res.download(partialPath, filename);
+        return res.download(partialPath, filename, (err) => {
+          if (err) return;
+          job.partialPaths = (job.partialPaths || []).filter((p) => p !== partialPath);
+          try {
+            fs.rmSync(partialPath, { force: true });
+          } catch {}
+        });
       }
 
       res.status(409).json({ error: "PDF is not ready yet." });

@@ -15,13 +15,14 @@ const {
   DynamicLimiter,
   isRateLimitError,
 } = require("./speedController");
+const { globalThrottle } = require("./globalThrottle");
 const {
   debugLog,
   debugChapterDownloaded,
   debugScrapeComplete,
 } = require("../debug");
 const { removeJobArtifacts } = require("./store");
-const { sleep, mapLimit, sanitizeFilename } = require("../util");
+const { mapLimit, sanitizeFilename, chapterDisplayLabel } = require("../util");
 
 const BASE_TMP = fs.mkdtempSync(path.join(os.tmpdir(), "asura-dl-"));
 
@@ -35,15 +36,23 @@ async function runJob(store, job, { retry = false } = {}) {
   const speed = new SpeedController(job.settings || {});
   job.speed = speed.snapshot();
   const limiter = new DynamicLimiter(speed.concurrency());
+  globalThrottle.setProfile(job.settings?.globalThrottleProfile ?? "balanced");
+  globalThrottle.setJobDelay(job.id, speed.delayMs());
+  job.throttle = globalThrottle.snapshot();
 
   const handleFailure = (err) => {
     if (!isRateLimitError(err)) return;
+    const firstPenalty = globalThrottle.reportRateLimit();
+    if (firstPenalty) store.pushLog(job, "Shared throttle slowed all jobs after a rate limit.");
     speed.reportRateLimit((line) => store.pushLog(job, line));
     limiter.setMax(speed.concurrency());
     job.speed = speed.snapshot();
+    job.throttle = globalThrottle.snapshot();
   };
 
   try {
+    await store.waitForResume(job);
+
     if (!retry) {
       store.setPhase(job, "discovering");
       if (
@@ -54,10 +63,10 @@ async function runJob(store, job, { retry = false } = {}) {
         job.totalChapters = (job.chapterUrls || []).length;
         for (let i = 0; i < job.totalChapters; i++) {
           const meta = (job.chapterMeta || [])[i] || {};
-          store.setChapter(job, i, {
-            status: "pending",
-            label: meta.label ?? meta.number ?? chapterLabel(job, i),
-            detail: meta.detail || null,
+            store.setChapter(job, i, {
+              status: "pending",
+              label: chapterDisplayLabel(meta.label ?? meta.number ?? chapterLabel(job, i)),
+              detail: meta.detail || null,
             parts: meta.parts || null,
             provider: meta.provider || null,
           });
@@ -65,17 +74,23 @@ async function runJob(store, job, { retry = false } = {}) {
         store.pushLog(job, `Found ${job.totalChapters} chapters.`);
       } else {
         const start = job.startChapter ?? job.firstChapter ?? null;
-        const info = await asura.discoverRange(job.slug, start, (m) =>
-          store.pushLog(job, m),
-          job.endChapter ?? null,
-        );
+        let info;
+        try {
+          info = await asura.discoverRange(job.slug, start, (m) =>
+            store.pushLog(job, m),
+            job.endChapter ?? null,
+          );
+        } catch (err) {
+          handleFailure(err);
+          throw err;
+        }
         job.title = info.title;
-        job.coverUrl = info.coverUrl || job.coverUrl || null;
+        job.coverUrl = job.coverUrl || info.coverUrl || null;
         job.firstChapter = info.firstChapter;
         job.lastChapter = info.lastChapter;
         job.totalChapters = info.lastChapter - info.firstChapter + 1;
         for (let ch = info.firstChapter; ch <= info.lastChapter; ch++) {
-          store.setChapter(job, ch, { status: "pending", label: ch });
+          store.setChapter(job, ch, { status: "pending", label: chapterDisplayLabel(ch) });
         }
         store.pushLog(
           job,
@@ -87,10 +102,12 @@ async function runJob(store, job, { retry = false } = {}) {
     pdfPath = path.join(dir, `${sanitizeFilename(job.title || job.slug || "comic")}.pdf`);
     job.pdfPath = pdfPath;
 
-    await prepareCover(store, job, dir);
+    await prepareCover(store, job, dir, handleFailure);
+    await store.waitForResume(job);
 
     store.setPhase(job, "scraping");
-    await fetchPrologue(store, job, dir, speed.delayMs());
+    await fetchPrologue(store, job, dir, handleFailure);
+    await store.waitForResume(job);
 
     const todo = retry
       ? store.findRetryable(job).filter((key) => !isPrologue(job, key))
@@ -99,13 +116,13 @@ async function runJob(store, job, { retry = false } = {}) {
       todo.map((key) =>
         limiter.run(async () => {
           await store.waitForResume(job);
-          if (speed.delayMs() > 0) await sleep(speed.delayMs());
           await processChapter(store, job, key, speed, handleFailure);
         }),
       ),
     );
 
     store.setPhase(job, "assembling");
+    await store.waitForResume(job);
     await buildPdf(store, job, pdfPath);
     recount(job);
     store.setPhase(job, "done");
@@ -126,6 +143,8 @@ async function runJob(store, job, { retry = false } = {}) {
     removeJobArtifacts(job);
     store.setPhase(job, "failed");
     store.finish(job, "failed", { error: err.message });
+  } finally {
+    globalThrottle.clearJobDelay(job.id);
   }
 }
 
@@ -138,6 +157,7 @@ async function processChapter(store, job, key, speed, handleFailure) {
   let chap;
   try {
     chap = await fetchChap(job, key);
+    await store.waitForResume(job);
   } catch (err) {
     handleFailure(err);
     const reason = `load failed (${err.status || err.code || "error"})`;
@@ -161,6 +181,8 @@ async function processChapter(store, job, key, speed, handleFailure) {
     return;
   }
   if (chap.blocked) {
+    const firstPenalty = globalThrottle.reportRateLimit();
+    if (firstPenalty) store.pushLog(job, "Shared throttle slowed all jobs after a captcha block.");
     store.pushLog(job, `${label}: blocked by captcha — skipped.`);
     store.setChapter(job, key, { status: "skipped", reason: "blocked by captcha" });
     job.skipped += 1;
@@ -239,9 +261,9 @@ async function buildPdf(store, job, pdfPath, { partial = false, doneOnly = false
 
   for (const key of keys) {
     const data = job.chapters[key] || {};
-    const label = data.label ?? chapterLabel(job, key);
+    const label = chapterDisplayLabel(data.label ?? chapterLabel(job, key));
     const detail = data.detail || null;
-    await addChapter(key, `Chapter ${label}`, detail);
+    await addChapter(key, label, detail);
   }
 
   builder.addTitlePage(job.title || job.slug || "comic", contents);
@@ -336,11 +358,12 @@ async function downloadImages(store, job, key, images, label) {
         throw err;
       }
     }
+    await store.waitForResume(job);
     return prepareImage(buffer);
   });
 }
 
-async function prepareCover(store, job, dir) {
+async function prepareCover(store, job, dir, handleFailure) {
   const coverPath = path.join(dir, "cover.img");
   const metaPath = path.join(dir, "cover.meta.json");
   if (fs.existsSync(coverPath)) {
@@ -360,6 +383,7 @@ async function prepareCover(store, job, dir) {
       store.pushLog(job, "Cover: retrying image…"),
     );
   } catch (err) {
+    handleFailure(err);
     const viaBrowser = generic.fetchViaBrowser
       ? await generic.fetchViaBrowser(job.coverUrl, { referer: job.url })
       : null;
@@ -401,7 +425,7 @@ async function prepareImage(buffer) {
   return { buffer: jpeg, width, height };
 }
 
-async function fetchPrologue(store, job, dir, delayMs) {
+async function fetchPrologue(store, job, dir, handleFailure) {
   if (job.hasPrologue) return;
   const prologueUrl =
     job.prologueUrl || (job.kind === "asura" ? asura.chapterUrl(job.slug, 0) : null);
@@ -413,18 +437,21 @@ async function fetchPrologue(store, job, dir, delayMs) {
   try {
     chap = await fetchChapterByUrl(prologueUrl);
   } catch (err) {
+    handleFailure(err);
     store.pushLog(job, `Prologue: check failed (${err.status || err.code || "error"}) — skipping.`);
-    if (delayMs > 0) await sleep(delayMs);
     return;
   }
   if (chap.notFound) {
     store.pushLog(job, "No chapter 0 (prologue) for this series.");
-    if (delayMs > 0) await sleep(delayMs);
     return;
   }
-  if (chap.locked || chap.blocked || chap.images.length === 0) {
+  if (chap.blocked) {
+    handleFailure({ status: 403 });
     store.pushLog(job, "Chapter 0 has no readable pages — skipping prologue.");
-    if (delayMs > 0) await sleep(delayMs);
+    return;
+  }
+  if (chap.locked || chap.images.length === 0) {
+    store.pushLog(job, "Chapter 0 has no readable pages — skipping prologue.");
     return;
   }
 
@@ -445,12 +472,12 @@ async function fetchPrologue(store, job, dir, delayMs) {
     store.pushLog(job, `Prologue: ${prepared.length} pages`);
     debugChapterDownloaded(job.id, "Prologue", prepared.length);
   } catch (err) {
+    handleFailure(err);
     store.pushLog(
       job,
       `Prologue: image download failed (${err.status || err.code || "error"}) — skipped.`,
     );
   }
-  if (delayMs > 0) await sleep(delayMs);
 }
 
 function chapterLabel(job, i) {

@@ -3,9 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Manhwa Downloader v0.9.2 beta 2</title>
+  <title>Manhwa Downloader v1.0.1 beta 3</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <link rel="alternate icon" href="/favicon.ico" sizes="any" />
   <style>
     :root {
       --bg: #13111a;
@@ -43,14 +42,21 @@
                   var(--bg);
       color: var(--text);
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: center;
       padding: 24px;
+    }
+    .layout {
+      width: 100%;
+      max-width: 640px;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 28px;
     }
     .card {
       position: relative;
       width: 100%;
-      max-width: 640px;
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 16px;
@@ -400,6 +406,12 @@
       padding: 3px 9px;
       border-radius: 7px;
       font-size: 14px;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+    .settings-close:hover {
+      background: rgba(145, 63, 226, 0.16);
+      border-color: var(--accent);
+      color: var(--text);
     }
     .settings-section {
       padding: 12px 0;
@@ -525,6 +537,7 @@
     .select-option[aria-selected="true"] { color: var(--accent-2); }
     .select-option small { color: var(--muted); font-size: 10px; }
     .settings-done { width: 100%; margin-top: 4px; padding: 9px 14px; }
+    .settings-done.applied { background: var(--ok); color: #06281a; border-color: var(--ok); }
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -551,6 +564,11 @@
       border: 1px solid var(--border);
       color: var(--muted);
     }
+    .modal-actions .danger {
+      background: var(--err);
+      color: #240608;
+      font-weight: 700;
+    }
     .hidden { display: none !important; }
     .first-chapter { margin-top: 18px; }
     .first-chapter form { display: flex; gap: 10px; }
@@ -569,6 +587,243 @@
       color: var(--muted);
     }
     .detected b { color: var(--accent-2); }
+    .detail-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 4px;
+      overflow-wrap: anywhere;
+    }
+    .detail-meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 14px;
+      overflow-wrap: anywhere;
+    }
+    .job-actions {
+      margin-top: 14px;
+      text-align: center;
+    }
+    .job-actions button {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 10px 16px;
+    }
+    .jobs-card {
+      padding: 20px;
+    }
+    .jobs-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .jobs-head b { font-size: 15px; }
+    .throttle-status {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 10px;
+      margin-bottom: 12px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .throttle-status b { color: var(--accent-2); }
+    .throttle-status .warn { color: var(--warn); font-weight: 700; }
+    .jobs-add {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border-radius: 8px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--accent-2);
+      font-size: 19px;
+      line-height: 1;
+    }
+    .jobs-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 320px;
+      min-height: 80px;
+      overflow-y: auto;
+    }
+    .jobs-empty {
+      padding: 18px 8px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .job-row {
+      background: #100e15;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .job-row:hover { border-color: rgba(145, 63, 226, 0.5); }
+    .job-row.selected {
+      border-color: var(--accent);
+      background: rgba(145, 63, 226, 0.12);
+    }
+    .job-row-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .job-row-title {
+      flex: 1;
+      min-width: 0;
+      font-size: 12px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .job-row-status {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .job-row-status.done { color: var(--ok); }
+    .job-row-status.paused { color: var(--warn); }
+    .job-row-status.failed { color: var(--err); }
+    .job-row-meta {
+      margin-top: 5px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .job-row .bar {
+      height: 5px;
+      margin-top: 8px;
+    }
+    .job-row-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .job-row-actions a,
+    .job-row-actions button {
+      padding: 4px 8px;
+      border-radius: 7px;
+      font-size: 11px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .job-row-download {
+      background: var(--ok);
+      color: #06281a;
+    }
+    .job-row-pause,
+    .job-row-archive {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .job-row-archive:hover {
+      border-color: rgba(248, 113, 113, 0.55);
+      color: var(--err);
+    }
+    .archive-head {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+    .archive-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: transparent;
+      border: none;
+      padding: 3px 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .archive-toggle:hover { color: var(--text); }
+    .archive-count {
+      min-width: 18px;
+      text-align: center;
+      font-size: 10px;
+      color: var(--muted);
+    }
+    .archive-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 6px;
+    }
+    .archive-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      padding: 5px 7px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.02);
+      font-size: 11px;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .archive-row:hover { border-color: rgba(145, 63, 226, 0.5); }
+    .archive-row.selected {
+      border-color: var(--accent);
+      background: rgba(145, 63, 226, 0.12);
+    }
+    .archive-row-title {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .archive-row-status {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--ok);
+    }
+    .archive-row-status.paused { color: var(--warn); }
+    .archive-row-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .archive-row-actions a,
+    .archive-row-actions button {
+      padding: 3px 6px;
+      border-radius: 6px;
+      font-size: 10px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .archive-row-download {
+      background: var(--ok);
+      color: #06281a;
+    }
+    .archive-row-rerun,
+    .archive-row-delete {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .archive-row-delete:hover { border-color: var(--err); color: var(--err); }
+    .jobs-hint {
+      margin-top: 12px;
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
     .sources {
       margin-top: 20px;
       border: 1px solid var(--border);
@@ -781,8 +1036,9 @@
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Manhwa Downloader <span class="version-badge">v0.9.2 beta 2</span></h1>
+  <div class="layout">
+    <div class="card">
+      <h1>Manhwa Downloader <span class="version-badge">v1.0.1 beta 3</span></h1>
     <button type="button" class="settings-btn" id="settings-btn" aria-label="Settings" aria-expanded="false" aria-controls="settings-menu">
       <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"></circle>
@@ -810,6 +1066,23 @@
         <div class="settings-row">
           <span>Chapter Hyperlinks</span>
           <button type="button" class="toggle" id="chapter-hyperlinks" role="switch" aria-checked="true" aria-label="Chapter Hyperlinks"></button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <span class="settings-label">Shared throttle</span>
+        <div class="settings-row">
+          <span>Profile</span>
+          <div class="custom-select" data-select="globalThrottleProfile">
+            <button type="button" class="select-trigger" id="globalThrottleProfile-trigger" aria-haspopup="listbox" aria-expanded="false">
+              <span id="globalThrottleProfile-value">Balanced</span><span class="select-chevron"></span>
+            </button>
+            <div class="select-options hidden" id="globalThrottleProfile-options" role="listbox">
+              <button type="button" class="select-option" role="option" data-value="safe" aria-selected="false">Safe<small>1 chapter, 2 images/host, 400ms</small></button>
+              <button type="button" class="select-option" role="option" data-value="balanced" aria-selected="true">Balanced<small>2 chapters, 4 images/host, 350ms</small></button>
+              <button type="button" class="select-option" role="option" data-value="fast" aria-selected="false">Fast<small>4 chapters, 4 images/host, 250ms</small></button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -940,6 +1213,8 @@
     </div>
 
     <div class="progress-wrap hidden" id="progress">
+      <div class="detail-title" id="detail-title"></div>
+      <div class="detail-meta" id="detail-meta"></div>
       <div class="row">
         <span id="status-label">Queued…</span>
         <span id="chapter-label"></span>
@@ -952,6 +1227,9 @@
 
     <div class="download hidden" id="download">
       <a id="download-link" href="#">Download PDF</a>
+    </div>
+    <div class="job-actions hidden" id="job-actions">
+      <button type="button" id="pause-btn">Pause export</button>
     </div>
     <div class="retry hidden" id="retry">
       <button type="button" id="retry-btn">Retry failed chapters</button>
@@ -975,6 +1253,41 @@
         </div>
       </div>
     </div>
+
+    <div class="modal-backdrop hidden" id="archive-delete-modal" role="dialog" aria-modal="true" aria-labelledby="archive-delete-title">
+      <div class="modal">
+        <h2 id="archive-delete-title">Delete archived job?</h2>
+        <p id="archive-delete-text">This removes the archived job from this browser. It does not delete the exported PDF or any server job still running.</p>
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="archive-delete-cancel">Cancel</button>
+          <button type="button" class="danger" id="archive-delete-confirm">Delete</button>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <aside class="card jobs-card" aria-label="Jobs">
+      <div class="jobs-head">
+        <b>Jobs</b>
+        <button type="button" class="jobs-add" id="jobs-new" aria-label="New export" title="New export">+</button>
+      </div>
+      <div class="throttle-status hidden" id="throttle-status">
+        <span>Shared throttle: <b id="throttle-profile">Balanced</b></span>
+        <span id="throttle-detail"></span>
+        <span class="warn hidden" id="throttle-cooldown">Cooling down…</span>
+      </div>
+      <div class="jobs-list" id="jobs-list">
+        <div class="jobs-empty" id="jobs-empty">No exports yet.</div>
+      </div>
+      <div class="archive-head">
+        <button type="button" class="archive-toggle" id="archive-toggle" aria-expanded="false">
+          <span>Archive</span>
+          <span class="archive-count" id="archive-count">0</span>
+        </button>
+      </div>
+      <div class="archive-list hidden" id="archive-list"></div>
+      <div class="jobs-hint">Click a job to see its progress here. Jobs keep running when you refresh.</div>
+    </aside>
   </div>
 
   <script src="/app.js"></script>

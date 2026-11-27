@@ -1,6 +1,7 @@
 "use strict";
 
 const config = require("../config");
+const { globalThrottle } = require("../jobs/globalThrottle");
 const { UA } = require("./http");
 
 let playwright = null;
@@ -86,10 +87,12 @@ async function renderPage(url, { title: pageTitle = null } = {}) {
     });
     const page = await context.newPage();
     try {
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: config.JS_RENDER_TIMEOUT_MS,
-      });
+      await globalThrottle.run("page", url, () =>
+        page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: config.JS_RENDER_TIMEOUT_MS,
+        }),
+      );
 
       // Give client JS a beat to mount, then scroll to load lazy images.
       const scrolls = config.JS_RENDER_SCROLLS;
@@ -209,14 +212,16 @@ async function fetchViaBrowser(url, { referer } = {}) {
     const page = await context.newPage();
     try {
       const extra = referer ? { referer } : {};
-      const res = await page.evaluate(
-        async ({ u, r }) => {
-          const resp = await fetch(u, { referrer: r || undefined });
-          if (!resp.ok) return null;
-          const buf = await resp.arrayBuffer();
-          return Array.from(new Uint8Array(buf));
-        },
-        { u: url, r: referer || null },
+      const res = await globalThrottle.run("image", url, () =>
+        page.evaluate(
+          async ({ u, r }) => {
+            const resp = await fetch(u, { referrer: r || undefined });
+            if (!resp.ok) return null;
+            const buf = await resp.arrayBuffer();
+            return Array.from(new Uint8Array(buf));
+          },
+          { u: url, r: referer || null },
+        ),
       );
       if (!res) return null;
       return Buffer.from(res);

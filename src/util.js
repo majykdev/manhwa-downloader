@@ -31,4 +31,14 @@ function sanitizeFilename(name) {
   return clean || "series";
 }
 
-module.exports = { sleep, mapLimit, sanitizeFilename };
+function chapterDisplayLabel(value) {
+  if (value === null || value === undefined) return "Chapter";
+  const text = String(value).trim();
+  if (!text) return "Chapter";
+  if (/^(?:chapter\s*)?0(?:\.0+)?$/i.test(text)) return "Prologue";
+  if (/^\d+(?:\.\d+)?$/.test(text)) return `Chapter ${text}`;
+  if (/^chapter\b/i.test(text) || /^prologue\b/i.test(text)) return text;
+  return `Chapter ${text}`;
+}
+
+module.exports = { sleep, mapLimit, sanitizeFilename, chapterDisplayLabel };

@@ -3,7 +3,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert");
 
-const { extractCoverUrl, extractMetaCoverUrl, seriesPageUrl } = require("../src/scraper/cover");
+const { extractCoverUrl, extractMetaCoverUrl, normalizeCoverUrl, seriesPageUrl } = require("../src/scraper/cover");
 
 test("extractCoverUrl uses the Asura cover container selector", () => {
   const html = `
@@ -16,6 +16,33 @@ test("extractCoverUrl uses the Asura cover container selector", () => {
   assert.strictEqual(
     extractCoverUrl(html, { kind: "asura", baseUrl: "https://asurascans.com" }),
     "https://asurascans.com/covers/asura.webp",
+  );
+});
+
+test("extractCoverUrl prefers the full-screen Asura viewer image", () => {
+  const html = `
+    <img id="cover-viewer-img" data-full-src="https://cdn.asurascans.com/asura-images/covers/series.a1.webp" />
+    <div id="desktop-cover-container">
+      <img src="https://cdn.asurascans.com/asura-images/covers/series.a1-400.webp" />
+    </div>
+  `;
+  assert.strictEqual(
+    extractCoverUrl(html, { kind: "asura", baseUrl: "https://asurascans.com" }),
+    "https://cdn.asurascans.com/asura-images/covers/series.a1.webp",
+  );
+});
+
+test("normalizeCoverUrl removes Asura -400 thumbnail suffix", () => {
+  assert.strictEqual(
+    normalizeCoverUrl("https://cdn.asurascans.com/asura-images/covers/series.a1-400.webp"),
+    "https://cdn.asurascans.com/asura-images/covers/series.a1.webp",
+  );
+  assert.strictEqual(
+    extractCoverUrl(
+      `<div id="desktop-cover-container"><img src="https://cdn.asurascans.com/asura-images/covers/series.a1-400.jpg" /></div>`,
+      { kind: "asura", baseUrl: "https://asurascans.com" },
+    ),
+    "https://cdn.asurascans.com/asura-images/covers/series.a1.jpg",
   );
 });
 

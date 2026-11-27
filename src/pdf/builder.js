@@ -165,10 +165,11 @@ class PdfBuilder {
   }
 
   addSpacer(label, pageSize, detail) {
-    const [pageW, pageH] = printerPageSize(pageSize);
+    const [, pageH] = printerPageSize(pageSize);
+    const pageW = this.maxPageWidth;
     const maxTextW = Math.max(40, pageW - 24);
-    const baseFontSize = Math.min(22, Math.max(12, Math.round(pageW / 18)));
-    const baseDetailFontSize = Math.min(10, Math.max(8, Math.round(pageW / 32)));
+    const baseFontSize = Math.min(28, Math.max(12, Math.round(pageW / 14)));
+    const baseDetailFontSize = Math.min(12, Math.max(8, Math.round(pageW / 32)));
     this.doc.addPage({ size: [pageW, pageH] });
     this.doc.rect(0, 0, pageW, pageH).fill("#ffffff");
     this.doc.font("Helvetica-Bold").fillColor("#111827");

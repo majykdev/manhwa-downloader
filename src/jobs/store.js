@@ -2,7 +2,9 @@
 
 const crypto = require("crypto");
 const fs = require("fs");
+const path = require("path");
 const config = require("../config");
+const { globalThrottle } = require("./globalThrottle");
 
 /**
  * In-memory job registry. Suitable for a single server instance
@@ -41,7 +43,9 @@ class JobStore {
       startChapter: null,
       endChapter: null,
       partialPaths: [],
+      tempCleaned: false,
       downloadPaused: false,
+      userPaused: false,
       pauseWaiters: [],
       logSeq: 0,
       currentChapter: null,
@@ -83,8 +87,13 @@ class JobStore {
       id: j.id,
       status: j.status,
       phase: j.phase,
+      paused: Boolean(j.userPaused || j.downloadPaused),
+      userPaused: Boolean(j.userPaused),
+      downloadPaused: Boolean(j.downloadPaused),
+      tempCleaned: Boolean(j.tempCleaned),
       settings: j.settings,
       speed: j.speed || null,
+      throttle: globalThrottle.snapshot(),
       title: j.title,
       slug: j.slug,
       kind: j.kind,
@@ -158,17 +167,24 @@ class JobStore {
   }
 
   setDownloadPause(job, paused) {
-    if (!paused) {
-      job.downloadPaused = false;
-      const waiters = job.pauseWaiters.splice(0);
-      for (const resolve of waiters) resolve();
-      return;
-    }
-    job.downloadPaused = true;
+    job.downloadPaused = Boolean(paused);
+    if (!job.downloadPaused && !job.userPaused) this._wakeWaiters(job);
+    this._emit(job, true);
+  }
+
+  setUserPause(job, paused) {
+    job.userPaused = Boolean(paused);
+    if (!job.userPaused && !job.downloadPaused) this._wakeWaiters(job);
+    this._emit(job, true);
+  }
+
+  _wakeWaiters(job) {
+    const waiters = job.pauseWaiters.splice(0);
+    for (const resolve of waiters) resolve();
   }
 
   waitForResume(job) {
-    if (!job.downloadPaused) return Promise.resolve();
+    if (!job.downloadPaused && !job.userPaused) return Promise.resolve();
     return new Promise((resolve) => {
       (job.pauseWaiters ||= []).push(resolve);
     });
@@ -214,7 +230,7 @@ class JobStore {
   }
 }
 
-module.exports = { JobStore, removeJobArtifacts };
+module.exports = { JobStore, removeJobArtifacts, clearJobTempFiles };
 
 function getCompletedChapterCount(job) {
   return Object.values(job.chapters || {}).filter((data) => data.status === "done").length;
@@ -236,6 +252,20 @@ function removeJobArtifacts(job) {
       fs.rmSync(job.pdfPath, { force: true });
     } catch {}
   }
+}
+
+function clearJobTempFiles(job) {
+  if (!job.tmpDir || !fs.existsSync(job.tmpDir)) return;
+  const keep = job.pdfPath ? path.resolve(job.pdfPath) : null;
+  for (const entry of fs.readdirSync(job.tmpDir)) {
+    const fullPath = path.join(job.tmpDir, entry);
+    if (keep && path.resolve(fullPath) === keep) continue;
+    try {
+      fs.rmSync(fullPath, { recursive: true, force: true });
+    } catch {}
+  }
+  job.partialPaths = [];
+  job.tempCleaned = true;
 }
 
 function getRetryable(job) {

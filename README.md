@@ -1,82 +1,228 @@
 # Manhwa Downloader
 
-Current release: **v0.9.2 beta 2** (`0.9.2-beta.2`).
+Current release: **v1.0.1 beta 3** (`1.0.1-beta.3`).
 
 A deployable web app that turns a manga/manhwa series into a single PDF. Asura
 Scans uses a fast numeric path, atsu.moe uses its public JSON API with selectable
-scanlation sources, and other scanlation sites use a generic scraper.
+scanlation sources, and other sites use a generic scraper.
 
-Paste a series or chapter URL (e.g. `https://asurascans.com/comics/trash-of-the-counts-family-7e1f454a/chapter/0` or `https://atsu.moe/manga/Baxr`) and click **Find chapters**. The UI shows every discovered chapter before scraping; each row can be edited to a custom URL from any supported site, and extra chapters can be added manually. The server:
+Paste a series or chapter URL (for example
+`https://asurascans.com/comics/trash-of-the-counts-family-7e1f454a/chapter/0` or
+`https://atsu.moe/manga/Baxr`) and click **Find chapters**. Every discovered
+chapter is shown for review before export, and each row can be edited or
+replaced with a URL from another supported site. Additional chapters can be
+added manually.
 
-1. strips chapter segments to find the series/title page, discovers chapters and the cover image, and returns a short-lived preview token,
-2. scrapes the reviewed chapter list using the Settings range (blank bounds mean first/last),
-3. downloads all page images (WebP → JPEG) with adaptive concurrency/delay,
-4. renders everything into one streaming PDF with the **cover as the first page** and a **two-line spacer page between chapters** (e.g. `Chapter 37` / `Chapters 37.1 + 37.2` for Atsu split parts),
-5. streams the finished PDF back to you, with an on-demand partial PDF available while scraping.
+Everything is fetched server-side: the browser only talks to your app and
+downloads the finished PDF, so source-site images do not cross the user's
+connection and there are no browser CORS issues.
 
-Everything runs **server-side** — the browser only ever talks to your app and downloads one finished PDF, so the source site's images never cross the user's connection (minimal bandwidth, no CORS issues).
+## Requirements
 
-## Run locally
+- macOS for the included double-clickable `.command` scripts. On other platforms,
+  use the manual Node commands below.
+- Git to clone and update the project.
+- Homebrew is recommended on macOS to install Git and Node. `setup.command` can
+  also install Node locally under `~/.local/node` when Homebrew is unavailable
+  or not writable.
+- Node 20 or newer.
+
+### Install Homebrew and Git
+
+If you already have Homebrew and Git, skip this section.
+
+Install Homebrew:
 
 ```bash
-npm install
-npm start          # http://localhost:3001
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-`npm run dev` runs with auto-reload. `npm test` runs offline tests against real saved HTML fixtures (no network).
+Homebrew prints PATH commands at the end of the installer. Run the one it shows,
+or run the appropriate line for your Mac:
+
+```bash
+# Apple Silicon
+eval "$(/opt/homebrew/bin/brew shellenv)"
+
+# Intel
+eval "$(/usr/local/bin/brew shellenv)"
+```
+
+Install Git:
+
+```bash
+brew install git
+```
+
+Verify:
+
+```bash
+git --version
+brew --version
+```
+
+## Install
+
+Clone the GitHub repository and run the setup and deploy scripts:
+
+```bash
+git clone https://github.com/majykdev/manhwa-downloader.git
+cd manhwa-downloader
+chmod +x ./*.command
+./setup.command
+./deploy.command
+```
+
+On macOS you can double-click the `.command` files instead of running them in a
+terminal. Run `setup.command` once on a fresh checkout; run `deploy.command`
+whenever you want to start or restart the local server.
+
+The app will be available at <http://localhost:3001>.
+
+## The three `.command` files
+
+| Script | When to run it | What it does |
+| --- | --- | --- |
+| `setup.command` | Once on a fresh install | Finds Homebrew or installs Node locally to `~/.local/node`, ensures Node 20+, runs `npm ci`, installs Playwright Chromium, and runs the test suite before reporting setup complete. |
+| `update.command` | Before updating an existing checkout | Requires Git, npm, a clean working tree, a Git checkout, and an `origin` remote. It runs `git fetch --prune origin`, fast-forwards the current branch with `git pull --ff-only origin <branch>`, and reruns `npm ci --no-audit --no-fund` only if `node_modules` is missing or `package-lock.json` changed. It does not start the server. |
+| `deploy.command` | After setup, and after an update when you want to restart | Ensures Node 20+ and `node_modules` exist, stops any process listening on port `3001`, starts the server in the background, waits for `/health`, writes the PID to `/tmp/manhwa-downloader-3001.pid`, writes logs to `/tmp/manhwa-downloader-3001.log`, and opens the browser unless `NO_OPEN=1` is set. |
+
+For manual, cross-platform use:
+
+```bash
+npm ci
+npm start          # http://localhost:3001
+npm run dev        # auto-reload
+npm test           # offline tests against saved HTML fixtures
+```
+
+## Features
+
+- **Source support**
+  - Auto-detects Asura Scans, atsu.moe, and generic sites from the URL hostname; there is no provider toggle.
+  - Asura links use the numeric chapter path and full-size viewer cover image, with `-400` thumbnail suffixes normalized before export.
+  - atsu.moe uses the public JSON API for manga info, chapter lists, providers, and reader pages.
+  - Other sites use the generic scraper, with source metadata, JSON-LD, and cover-like images used for discovery.
+  - Static HTML is tried first; JS-heavy or protected pages fall back to Playwright rendering and, when needed, an optional TLS/HTTP2 impersonation client.
+  - Server-side fetching avoids browser CORS issues and keeps source images off the user's connection.
+
+- **Review before export**
+  - Discovery returns a short-lived token and a complete chapter preview; no job starts automatically.
+  - Chapter rows can be edited to custom URLs, and each custom URL is detected as Asura, Atsu, or generic independently of the original series.
+  - Extra chapters can be added manually with numbers inferred from their URLs when possible, then inserted in numeric order.
+  - For atsu.moe, providers can be enabled/disabled and reordered, with per-chapter and per-part overrides. Missing selected parts fall back automatically to any available provider.
+  - Coverage is checked against chapter links and JSON-LD `numberOfEpisodes` or the page's `rel=next` chain, so 0-based and 1-based series both end at the newest chapter.
+  - Chapter 0 is an optional prologue: it is probed and included with a `Prologue` spacer when present, excluded from chapter counts, and skipped when a manual start is `>= 1`.
+  - Decimal Atsu parts such as `37.1` and `37.2` are combined with chapter `37` into one logical chapter, including when a part is missing.
+  - Premium or locked chapters with no page images are skipped and reported in the progress log while keeping the spacer so numbering stays consistent.
+
+- **Settings and shared throttling**
+  - Start/end chapter bounds are chapter numbers, not array indexes; blank bounds mean first/last, and an end above the last chapter exports through the end.
+  - Settings are per job/draft, not global. **Apply** commits them to the active draft and shows a green `✓ Applied!` state until the settings change or the panel is reopened.
+  - New jobs and refreshed sessions start from defaults; applied values stay with their draft, job, or archived record.
+  - **Chapter Hyperlinks** is enabled by default; turning it off keeps PDF table-of-contents labels but removes clickable links.
+  - Shared throttle profiles are **Safe**, **Balanced**, and **Fast**, with app-wide page limits and per-host image buckets so concurrent jobs do not hammer the same site.
+  - Speed can be Auto or manual. Auto starts conservatively, steps down on rate limits and retries, and slowly recovers; manual high concurrency falls back when throttled.
+  - Running jobs can be paused and resumed. Rate limits, retries, and cooldown state are reflected in the Jobs panel.
+
+- **Jobs, drafts, and archive**
+  - Multiple jobs can be created with the `+` button and run in parallel; job rows show status, progress, and the absolute current/max chapter.
+  - Active jobs and editable drafts persist across browser refreshes through `sessionStorage`, and background jobs continue running.
+  - The progress bar appears only while a job is actively exporting.
+  - The `×` action pauses a running job before archiving it, or archives a finished/failed job directly; archiving the last job automatically creates a new blank draft.
+  - Downloading the final PDF from a job also archives it.
+  - The Archive section is collapsed by default and stores records in `localStorage`.
+  - Valid archives have a one-hour download window; expired archives offer **Rerun**.
+  - Clicking an archived job loads a fresh editable draft into the main card with its URL, settings, reviewed chapters, sources, cover, and saved progress details.
+  - Archive deletion uses a custom Cancel/Delete confirmation modal.
+  - The debug log shows server errors and chapter failures, streamed over Server-Sent Events with polling and `GET /api/debug/log` as fallbacks.
+
+- **Covers and PDF output**
+  - A user-supplied cover URL always wins over auto-detection.
+  - Detected covers come from Asura/Atsu selectors or generic metadata; a found cover is rendered as PDF page 1, while a missing or failed cover falls back to a PDF without it.
+  - The PDF is written with `pdfkit` directly to disk, keeping only prepared images in memory so large books do not exhaust the process.
+  - Each chapter is preceded by a centered two-line spacer page, such as `Chapter 37` and `Chapters 37.1 + 37.2`, with text capped at 28pt/12pt and divider width matching the image width.
+  - PDF pages use phone-friendly dimensions by default, with `natural` or `first` chapter page-size modes and configurable JPEG quality.
+  - While a job is running, `/api/jobs/:id/download` builds a partial PDF from completed chapters and pauses scraping until the response finishes. The final download is the complete PDF.
+  - Finished jobs, PDFs, and temporary images are deleted after `JOB_TTL_MS` (default one hour).
+
+## Quick update
+
+```bash
+cd manhwa-downloader
+git status --short
+./update.command
+./deploy.command
+```
+
+`update.command` refuses to run if the checkout has uncommitted changes. Commit,
+stash, or discard local changes first. It updates the code and dependencies only;
+run `deploy.command` afterward to restart the local server with the new version.
 
 ## Deploy
 
-Any Node host works. Set `PORT` via env. On macOS, double-click `deploy.command` to start the local server on port 3001.
+Local macOS deploy is handled by `deploy.command`:
 
-To update an existing checkout to the latest GitHub `main`, double-click `update.command`. It fast-forwards the folder, refreshes dependencies only when needed, and refuses to run if you have uncommitted local changes.
-## How it works
+```bash
+./deploy.command
+```
 
-- The source site is auto-detected from the hostname — there is no provider toggle. Asura links use the numeric path, `atsu.moe` links use the Atsu adapter, everything else falls back to the generic scraper.
-- Static HTML is tried first (Asura chapter pages contain plain `<img>` tags pointing at the image CDN). For JS-heavy or Cloudflare-protected sites the server falls back to a Playwright-rendered page and, when needed, an optional TLS/HTTP2 impersonation client.
-- Atsu chapters come from `GET /api/manga/page` and `GET /api/manga/allChapters`; pages come from `GET /api/read/chapter` and `https://cdn.atsu.moe`. Multiple providers for the same chapter number are grouped. Decimal parts such as `37.1`/`37.2` are combined with chapter `37` into one logical chapter (even when one part is missing) and are rendered with a two-line spacer; no completeness warning is shown for split parts.
-- Initial discovery never starts a job automatically. Every provider returns a chapter list with a short-lived `discoveryToken` so the browser can show found chapters, Edit link buttons, Add chapter, and an optional cover image URL before export.
-- A custom chapter URL is detected per link (Asura/Atsu/generic), not by the series' original provider, so a row can be pointed at a mirror or another site. Added chapters get their number from the URL when possible and are inserted in numeric order.
-- Before starting an Atsu job the UI lets you enable/disable providers, reorder provider priority (chapter order stays numeric), and override the provider for an individual chapter or decimal part. If your selected providers do not cover a part, any remaining provider is used automatically; a chapter is only omitted when no source has any part.
-- The Settings gear exposes start/end chapter bounds plus custom concurrency and delay dropdowns and a Chapter Hyperlinks toggle. Bounds are chapter numbers (start `37` is chapter 37, not index 37); start `0` falls back to chapter 1 when there is no prologue, and a start >= 1 skips the prologue. An end above the last chapter exports everything from the start.
-- Auto speed starts at concurrency 4 / 400 ms, steps down on rate limits and retries, and slowly ramps the delay back up after sustained success. Manual high concurrency falls back to 1 chapter at a time when throttled. Chapter Hyperlinks is enabled by default; turning it off keeps PDF table-of-contents labels but removes their clickable links. Settings are saved in `localStorage` only when **Apply** is clicked and sent with each job.
-- The numbered chapter range comes from the series page's chapter links, corrected against JSON-LD `numberOfEpisodes` (e.g. `186`), so both 0-based and 1-based series end on the newest chapter. If neither source exists it follows each page's `<link rel="next">`.
-- Chapter 0 is treated as an optional prologue: it is probed on every job and included (with a `Prologue` spacer) when it exists, but it is not counted in chapter numbers or totals. A missing chapter 0 is ignored without being reported as a skip. A manual start >= 1 skips the prologue probe entirely.
-- Premium/locked chapters (no page images + paywall markers) are skipped and reported in the progress log; the spacer still appears so chapter numbering in the PDF stays consistent.
-- The cover comes from the series/title page or the optional cover URL entered during review: Asura and Atsu use their specific cover selectors, while other sites use metadata/JSON-LD and cover-like images after chapter URL segments are removed. A user-supplied cover URL wins over the auto-detected one. A found cover is rendered as PDF page 1; if it cannot be found or downloaded, the PDF is still built without it.
-- The PDF is written with `pdfkit` straight to disk, one prepared JPEG in memory at a time, so multi-thousand-page books won't exhaust the process memory. Finished jobs, their PDFs, and their temporary chapter images are all deleted after `JOB_TTL_MS` (default 1 h).
-- While a job is running, `/api/jobs/:id/download` builds a partial PDF on demand from chapters already marked done and pauses scraping until the response finishes. The final download is the complete PDF.
-- The UI has a small debug log at the bottom that shows server errors and chapter-pull failures. Job progress and debug entries are streamed over Server-Sent Events, with polling and `GET /api/debug/log` as fallbacks.
+Use `NO_OPEN=1 ./deploy.command` when you do not want it to open a browser, such
+as in automation. The script checks `/health` before reporting success.
+
+For a generic Node host, set environment variables and run:
+
+```bash
+npm ci
+PORT=3001 npm start
+```
+
+`npm run dev` is suitable for local development with auto-reload. Any Node 20+
+host should work. The included `Dockerfile` builds the app with Chromium for the
+Playwright fallback:
+
+```bash
+docker build -t manhwa-downloader .
+docker run -p 3001:3001 manhwa-downloader
+```
+
+The app is single-instance by design because jobs live in memory. Use one web
+process; move `JobStore` to a shared store before scaling horizontally.
 
 ## API
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/discover` | Body `{ "url": "...", "startChapter": 37, "endChapter": null, "settings": { "concurrency": "auto", "delay": "auto", "chapterHyperlinks": true } }` → detected kind plus a short-lived `discoveryToken`, chapter preview entries, cover URL, and Atsu providers/options for logical chapters and decimal parts. |
-| `POST` | `/api/scrape` | Body `{ "discoveryToken": "...", "chapterUrlOverrides": {}, "addedChapters": [{ "number": 58, "url": "..." }], "coverUrl": "...", "sourceOrder": [], "enabledSourceIds": [], "chapterOverrides": {}, "settings": {...} }` → `{ "jobId" }`. Starts the reviewed job. Also accepts the legacy direct-url body. Responds `422 NEED_FIRST_CHAPTER` when no chapter list is found and `400` when no chapter matches the range. |
+| `POST` | `/api/discover` | Body `{ "url": "...", "startChapter": 37, "endChapter": null, "settings": { ... } }` → detected kind, short-lived `discoveryToken`, chapter preview, cover URL, and Atsu provider options. |
+| `POST` | `/api/scrape` | Body `{ "discoveryToken": "...", "chapterUrlOverrides": {}, "addedChapters": [{ "number": 58, "url": "..." }], "coverUrl": "...", "sourceOrder": [], "enabledSourceIds": [], "chapterOverrides": {}, "settings": { ... } }` → `{ "jobId" }`. Also accepts the legacy direct-url body. Responds `422 NEED_FIRST_CHAPTER` when no chapter list is found and `400` when no chapter matches the range. |
 | `POST` | `/api/jobs/:id/retry` | Re-scrapes chapters that failed only at image download and rebuilds the PDF. |
-| `GET` | `/api/jobs/:id` | Job progress: phase, status, current/last chapter, completed count, pages, skips, log IDs, speed state, and download URL. |
+| `POST` | `/api/jobs/:id/pause` | Pauses a running job and returns a paused snapshot. |
+| `POST` | `/api/jobs/:id/resume` | Resumes a paused job. |
+| `GET` | `/api/jobs/:id` | Job snapshot: phase, status, chapter progress, completed count, pages, skips, log, speed/throttle state, and download URL. |
 | `GET` | `/api/jobs/:id/events` | SSE stream of job snapshots. |
-| `GET` | `/api/jobs/:id/download` | Streams the complete PDF; while running, builds and streams a partial PDF from chapters already done. |
+| `GET` | `/api/jobs/:id/download` | Streams the complete PDF; while running, builds a partial PDF from chapters already done. |
 | `GET` | `/api/debug/log` | Recent structured debug entries for the UI debug window. |
 | `GET` | `/api/debug/events` | SSE stream of new debug entries. |
-| `GET` | `/health` | Health check for platform probes. |
+| `GET` | `/health` | Health check for platform probes and `deploy.command`. |
 
 ## Configuration
 
-See `.env.example`. Key knobs:
+Environment variables are documented in `.env.example`; set them in your shell
+or deployment platform's environment. Key knobs:
 
-- `CHAPTER_DELAY_MS` (400) — delay between chapter requests; raise it to be friendlier to the source site.
+- `PORT` (3001) — HTTP port.
+- `CHAPTER_DELAY_MS` (400) — delay between chapter requests; raise it to be friendlier to source sites.
 - `IMAGE_PARALLELISM` (4) — concurrent image downloads within a chapter.
-- `MAX_IMAGES_PER_CHAPTER` (200) — hard cap on pages scraped per chapter.
-- `PDF_MAX_PAGE_WIDTH` (390) — PDF page width in points; phone-friendly by default, with height following the image's aspect ratio.
+- `MAX_IMAGES_PER_CHAPTER` (200) — hard cap on page images scraped per chapter.
+- `PDF_MAX_PAGE_WIDTH` (390) — PDF page width in points; phone-friendly by default, with height following the image aspect ratio.
 - `PDF_CHAPTER_PAGE_SIZE_MODE` (`natural`) — `natural` keeps each image's aspect ratio; `first` normalizes every page in a chapter to the first image page's size.
-- `JOB_TTL_MS` (3600000) — how long finished jobs, PDFs, and temp files are kept before deletion.
+- `PDF_JPEG_QUALITY` (85) — JPEG quality for embedded page images, from 0 to 100.
+- `JOB_TTL_MS` (3600000) — how long finished jobs, PDFs, and temporary files are kept before deletion.
 - `JS_RENDER_ENABLED` (true), `JS_RENDER_TIMEOUT_MS` (30000), `JS_RENDER_SCROLLS` (10) — Playwright fallback for JS-driven pages.
 - `TLS_IMPERSONATION_ENABLED` (true), `CAPTCHA_GRACE_MS` (8000) — TLS/HTTP2 impersonation fallback and captcha detection grace period.
 
 ## Notes
 
-- **Single instance only.** Jobs live in memory. The web process runs them in the background and streams progress over SSE with polling fallback, which fits Render/Railway/Fly free/starter tiers. Swap the in-memory `JobStore` for Redis before scaling to multiple instances.
-- Scraping public sites can trigger rate limits or Cloudflare blocks. The client retries with exponential backoff and the job adapts concurrency/delay on 403/429/503/520, timeouts, and Cloudflare challenges. If you hit persistent blocks, use Auto speed or raise `CHAPTER_DELAY_MS`.
-- Use responsibly: respect the source site's terms and only download content you have the right to keep.
+- Scraping public sites can trigger rate limits or Cloudflare blocks. The client retries with exponential backoff, and jobs adapt concurrency and delay after 403/429/503/520 responses, timeouts, and challenge pages. Use Auto speed or raise `CHAPTER_DELAY_MS` if blocks persist.
+- Keep only one instance running unless you replace the in-memory `JobStore` with a shared store.
+- Use the app responsibly: respect source-site terms and only download content you have the right to keep.

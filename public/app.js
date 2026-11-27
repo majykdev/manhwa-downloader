@@ -13,6 +13,24 @@ const logBox = document.getElementById("log");
 const chapterListBox = document.getElementById("chapter-list");
 const downloadBox = document.getElementById("download");
 const downloadLink = document.getElementById("download-link");
+const jobActionsBox = document.getElementById("job-actions");
+const pauseBtn = document.getElementById("pause-btn");
+const detailTitle = document.getElementById("detail-title");
+const detailMeta = document.getElementById("detail-meta");
+const jobsNewBtn = document.getElementById("jobs-new");
+const jobsListBox = document.getElementById("jobs-list");
+const jobsEmpty = document.getElementById("jobs-empty");
+const archiveToggle = document.getElementById("archive-toggle");
+const archiveListBox = document.getElementById("archive-list");
+const archiveCount = document.getElementById("archive-count");
+const archiveDeleteModal = document.getElementById("archive-delete-modal");
+const archiveDeleteText = document.getElementById("archive-delete-text");
+const archiveDeleteCancel = document.getElementById("archive-delete-cancel");
+const archiveDeleteConfirm = document.getElementById("archive-delete-confirm");
+const throttleStatusBox = document.getElementById("throttle-status");
+const throttleProfileLabel = document.getElementById("throttle-profile");
+const throttleDetailLabel = document.getElementById("throttle-detail");
+const throttleCooldownLabel = document.getElementById("throttle-cooldown");
 const firstChapterBox = document.getElementById("first-chapter");
 const firstChapterForm = document.getElementById("first-chapter-form");
 const firstChapterUrlInput = document.getElementById("first-chapter-url");
@@ -52,31 +70,42 @@ const settingsModal = document.getElementById("settings-modal");
 const settingsModalConfirm = document.getElementById("settings-modal-confirm");
 const settingsModalCancel = document.getElementById("settings-modal-cancel");
 
-const SETTINGS_KEY = "manhwa-downloader-settings";
+const JOBS_KEY = "manhwa-downloader-jobs";
+const DRAFTS_KEY = "manhwa-downloader-drafts";
+const ARCHIVE_KEY = "manhwa-downloader-archive";
+const ARCHIVE_TTL_MS = 60 * 60 * 1000;
+const ARCHIVE_LIMIT = 100;
+const ACTIVE_JOB_KEY = "manhwa-downloader-active-job";
 const DEFAULT_SETTINGS = {
   startChapter: "",
   endChapter: "",
   concurrency: "auto",
   delay: "auto",
+  globalThrottleProfile: "balanced",
   chapterHyperlinks: true,
 };
 
-let settings = loadSettings();
+let settings = { ...DEFAULT_SETTINGS };
 let draftSettings = { ...settings };
-let pollTimer = null;
+let settingsApplied = false;
 let jobEventSource = null;
 let debugEventSource = null;
 let debugPollTimer = null;
+let jobsPollTimer = null;
+let pollingJobs = false;
 let pendingConcurrency = null;
 let pendingDiscovery = null;
 let reviewState = null;
 let sourceState = null;
 let addChapterNumberAutoFilled = false;
-let seenLogs = 0;
-let lastJobLogId = 0;
 let activeJobId = null;
 let lastDebugId = 0;
-let lastPollErrorAt = 0;
+let autoDiscoverTimer = null;
+let discoveryGeneration = 0;
+let archiveRerun = null;
+let activeArchiveId = null;
+let pendingArchiveDeleteId = null;
+const jobs = new Map();
 const chapterRows = new Map();
 
 function show(el) { el.classList.remove("hidden"); }
@@ -105,31 +134,44 @@ function applyDetectedChapterNumber() {
   addChapterNumberAutoFilled = detected !== null;
 }
 
-function loadSettings() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
-    const loaded = { ...DEFAULT_SETTINGS, ...saved };
-    loaded.chapterHyperlinks = loaded.chapterHyperlinks !== false;
-    return loaded;
-  } catch {
-    return { ...DEFAULT_SETTINGS };
+function normalizedSettings(value) {
+  const merged = { ...DEFAULT_SETTINGS, ...(value || {}) };
+  merged.chapterHyperlinks = merged.chapterHyperlinks !== false;
+  if (!["safe", "balanced", "fast"].includes(merged.globalThrottleProfile)) {
+    merged.globalThrottleProfile = "balanced";
   }
+  return merged;
 }
 
-function saveSettings() {
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  } catch {}
+function resetSettingsApplied() {
+  settingsApplied = false;
+  settingsApply.textContent = "Apply";
+  settingsApply.classList.remove("applied");
+}
+
+function markSettingsApplied() {
+  settingsApplied = true;
+  settingsApply.textContent = "✓ Applied!";
+  settingsApply.classList.add("applied");
 }
 
 function renderSettings() {
   startChapterInput.value = draftSettings.startChapter ?? "";
   endChapterInput.value = draftSettings.endChapter ?? "";
   chapterHyperlinksToggle.setAttribute("aria-checked", String(draftSettings.chapterHyperlinks !== false));
-  for (const key of ["concurrency", "delay"]) {
+  for (const key of ["concurrency", "delay", "globalThrottleProfile"]) {
     const value = String(draftSettings[key] ?? "auto");
     const label = document.getElementById(`${key}-value`);
-    if (label) label.textContent = value === "auto" ? "Auto" : key === "delay" ? `${value}ms` : value;
+    if (label) {
+      label.textContent =
+        key === "globalThrottleProfile"
+          ? value.charAt(0).toUpperCase() + value.slice(1)
+          : value === "auto"
+            ? "Auto"
+            : key === "delay"
+              ? `${value}ms`
+              : value;
+    }
     for (const option of document.querySelectorAll(`[data-select="${key}"] .select-option`)) {
       option.setAttribute("aria-selected", String(option.dataset.value === value));
     }
@@ -138,6 +180,7 @@ function renderSettings() {
 
 function openSettings() {
   draftSettings = { ...settings };
+  resetSettingsApplied();
   renderSettings();
   show(settingsMenu);
   settingsBtn.setAttribute("aria-expanded", "true");
@@ -165,12 +208,21 @@ function closeAllSelects(except = null) {
 
 function applySetting(key, value) {
   draftSettings[key] = value;
+  resetSettingsApplied();
   renderSettings();
 }
 
 function commitSettings() {
-  settings = { ...draftSettings };
-  saveSettings();
+  const committed = normalizedSettings(draftSettings);
+  settings = committed;
+  draftSettings = { ...committed };
+  const draft = activeDraft();
+  if (draft) {
+    draft.settings = { ...committed };
+    syncActiveDraft();
+  }
+  markSettingsApplied();
+  renderSettings();
 }
 
 function setupCustomSelect(key) {
@@ -188,6 +240,9 @@ function setupCustomSelect(key) {
       trigger.setAttribute("aria-expanded", "true");
       const selected = options.find((option) => option.dataset.value === String(draftSettings[key]));
       (selected || options[0])?.focus();
+    } else {
+      hide(optionsBox);
+      trigger.setAttribute("aria-expanded", "false");
     }
   });
 
@@ -236,7 +291,7 @@ settingsBtn.addEventListener("click", (event) => {
 settingsClose.addEventListener("click", () => closeSettings());
 settingsApply.addEventListener("click", () => {
   commitSettings();
-  closeSettings();
+  closeAllSelects();
 });
 settingsModalCancel.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -250,13 +305,14 @@ settingsModalConfirm.addEventListener("click", (event) => {
   pendingConcurrency = null;
   hide(settingsModal);
 });
-startChapterInput.addEventListener("change", () => applySetting("startChapter", startChapterInput.value.trim()));
-endChapterInput.addEventListener("change", () => applySetting("endChapter", endChapterInput.value.trim()));
+startChapterInput.addEventListener("input", () => applySetting("startChapter", startChapterInput.value.trim()));
+endChapterInput.addEventListener("input", () => applySetting("endChapter", endChapterInput.value.trim()));
 chapterHyperlinksToggle.addEventListener("click", () => {
   applySetting("chapterHyperlinks", chapterHyperlinksToggle.getAttribute("aria-checked") !== "true");
 });
 setupCustomSelect("concurrency");
 setupCustomSelect("delay");
+setupCustomSelect("globalThrottleProfile");
 
 document.addEventListener("click", (event) => {
   const modalOpen = !settingsModal.classList.contains("hidden");
@@ -288,6 +344,10 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (!archiveDeleteModal.classList.contains("hidden")) {
+    closeArchiveDeleteModal();
+    return;
+  }
   if (!settingsModal.classList.contains("hidden")) {
     pendingConcurrency = null;
     hide(settingsModal);
@@ -349,6 +409,7 @@ function applyCoverUrl() {
   } else {
     setCoverApplyStatus(detected ? "Using detected cover" : "No cover", Boolean(detected));
   }
+  syncActiveDraft();
 }
 
 function extractReviewChapterNumber(url) {
@@ -414,6 +475,7 @@ function enforcePartSelection(recentKey) {
 function renderReviewChapters() {
   if (!reviewState) {
     reviewListBox.innerHTML = "";
+    syncActiveDraft();
     return;
   }
 
@@ -466,6 +528,7 @@ function renderReviewChapters() {
       renderChapterSourceList();
     });
   }
+  syncActiveDraft();
 }
 
 function beginChapterEdit(key, row) {
@@ -570,10 +633,36 @@ function requestBody(extra = {}) {
     settings: {
       concurrency: settings.concurrency,
       delay: settings.delay,
+      globalThrottleProfile: settings.globalThrottleProfile || "balanced",
       chapterHyperlinks: settings.chapterHyperlinks !== false,
     },
     ...extra,
   };
+}
+
+function buildScrapePayload() {
+  if (!reviewState || !reviewState.token) {
+    throw new Error("This chapter preview expired. Search again.");
+  }
+  const extra = {
+    discoveryToken: reviewState.token,
+    chapterUrlOverrides: { ...reviewState.overrides },
+    addedChapters: reviewState.chapters
+      .filter((chapter) => chapter.added)
+      .map((chapter) => ({
+        number: chapter.number,
+        url: chapter.customUrl || chapter.url,
+        label: chapter.label,
+      })),
+    coverUrl: reviewState.appliedCoverUrl || reviewState.detectedCoverUrl || undefined,
+  };
+  if (sourceState) {
+    extra.sourceOrder = [...sourceState.order];
+    extra.enabledSourceIds = [...sourceState.enabled];
+    extra.chapterOverrides = { ...sourceState.overrides };
+    extra.excludedPartKeys = [...sourceState.disabledParts];
+  }
+  return requestBody(extra);
 }
 
 function handleErrorResponse(res, body) {
@@ -599,26 +688,31 @@ async function readJson(res) {
   }
 }
 
-function resetActivity() {
-  seenLogs = 0;
-  lastJobLogId = 0;
-  logBox.innerHTML = "";
-  chapterListBox.innerHTML = "";
-  chapterRows.clear();
-  hide(chapterListBox);
-  hide(downloadBox);
-  hide(retryBox);
+function resetComposer() {
   hide(firstChapterBox);
   hide(sourcesPanel);
-  hide(progressBox);
+  hide(detectedBox);
   reviewListBox.innerHTML = "";
   reviewCoverUrlInput.value = "";
   setCoverApplyStatus("", false);
   pendingDiscovery = null;
   reviewState = null;
   sourceState = null;
+}
+
+function resetDetailState() {
+  logBox.innerHTML = "";
+  chapterListBox.innerHTML = "";
+  chapterRows.clear();
+  hide(chapterListBox);
+  hide(logBox);
+  hide(downloadBox);
+  hide(jobActionsBox);
+  hide(retryBox);
+  hide(progressBox);
   stats.innerHTML = "";
-  closeJobEvents();
+  detailTitle.textContent = "";
+  detailMeta.textContent = "";
 }
 
 function appendDebug(level, message) {
@@ -654,18 +748,17 @@ function classify(line) {
   return "";
 }
 
-function renderLog(log) {
+function renderLog(log, state) {
   if (!log || log.length === 0) return;
   show(logBox);
-  for (const entry of log) {
+  for (let i = 0; i < log.length; i++) {
+    const entry = log[i];
     const message = typeof entry === "string" ? entry : entry.message;
-    if (typeof entry === "object" && entry.id != null) {
-      if (entry.id <= lastJobLogId) continue;
-      lastJobLogId = entry.id;
-    } else {
-      if (seenLogs >= log.length) continue;
-      seenLogs = log.length;
-    }
+    let key;
+    if (typeof entry === "object" && entry.id != null) key = `id:${entry.id}`;
+    else key = `index:${i}`;
+    if (!state || state.logSeen.has(key)) continue;
+    state.logSeen.add(key);
     const cls = classify(message);
     const div = document.createElement("div");
     div.textContent = message;
@@ -676,32 +769,80 @@ function renderLog(log) {
   logBox.scrollTop = logBox.scrollHeight;
 }
 
-function render(snap) {
+function currentChapterText(snap) {
+  const total = snap.totalChapters || 0;
+  if (snap.currentChapter === null || snap.currentChapter === undefined) {
+    return total > 0 ? `${total} chapters` : "";
+  }
+  const active = (snap.chapters || []).find(
+    (chapter) => Number(chapter.chapter) === Number(snap.currentChapter),
+  );
+  const raw = active?.label ?? snap.currentChapter;
+  const text = String(raw);
+  if (/^(chapter|prologue)\b/i.test(text)) return text;
+  return `Chapter ${text}`;
+}
+
+function maxChapterNumber(snap) {
+  const values = [snap.lastChapter, snap.endChapter];
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  let max = null;
+  for (const chapter of snap.chapters || []) {
+    const raw = chapter.label ?? chapter.chapter ?? chapter.number;
+    const match = typeof raw === "string" ? raw.match(/\d+(?:\.\d+)?/) : null;
+    const number = match ? Number(match[0]) : Number(raw);
+    if (Number.isFinite(number)) max = max === null ? number : Math.max(max, number);
+  }
+  if (max !== null) return max;
+  if (snap.firstChapter && snap.totalChapters) {
+    return Number(snap.firstChapter) + Number(snap.totalChapters) - 1;
+  }
+  return snap.totalChapters || 0;
+}
+
+function renderDetail(snap, state, { archived = false } = {}) {
+  show(progressBox);
   const total = snap.totalChapters || 0;
   const done = snap.completedChapters ?? 0;
-  if (total > 0) {
-    barFill.style.width = `${(Math.min(1, done / total) * 100).toFixed(1)}%`;
-    barFill.style.animation = "";
-    if (snap.status === "running") {
-      if (snap.phase === "assembling") {
-        statusLabel.textContent = "Assembling PDF…";
-        chapterLabel.textContent = `${done} / ${total} chapters scraped`;
-      } else if (snap.phase === "discovering") {
-        statusLabel.innerHTML = `<span class="spin"></span> Locating chapters…`;
-        chapterLabel.textContent = "";
-      } else {
-        statusLabel.innerHTML = `Downloading <b>chapter ${snap.currentChapter}</b>`;
-        chapterLabel.textContent = `${done} / ${total} chapters`;
-      }
+  detailTitle.textContent = snap.title || snap.slug || "Untitled export";
+  const meta = [kindLabel(snap.kind)];
+  if (snap.startChapter !== null || snap.endChapter !== null) {
+    const start = snap.startChapter ?? "first";
+    const end = snap.endChapter ?? "last";
+    meta.push(`Chapters ${start}–${end}`);
+  }
+  detailMeta.textContent = meta.join(" · ");
+
+  barFill.style.width = total > 0 ? `${(Math.min(1, done / total) * 100).toFixed(1)}%` : "100%";
+  barFill.style.animation = total > 0 ? "" : "none";
+
+  if (snap.status === "running" && snap.paused) {
+    statusLabel.textContent = "Paused";
+    chapterLabel.textContent = currentChapterText(snap);
+  } else if (snap.status === "running") {
+    if (snap.phase === "assembling") {
+      statusLabel.textContent = "Assembling PDF…";
+      chapterLabel.textContent = `${done} / ${total} chapters scraped`;
+    } else if (snap.phase === "discovering") {
+      statusLabel.innerHTML = `<span class="spin"></span> Locating chapters…`;
+      chapterLabel.textContent = "";
     } else {
-      statusLabel.textContent = snap.status;
-      chapterLabel.textContent = `${total} chapters`;
+      statusLabel.textContent = `Downloading ${currentChapterText(snap)}`;
+      chapterLabel.textContent = `${done} / ${total} chapters`;
     }
+  } else if (snap.status === "complete") {
+    statusLabel.textContent = "Complete";
+    chapterLabel.textContent = `${total} chapters`;
+  } else if (snap.status === "failed") {
+    statusLabel.textContent = "Failed";
+    chapterLabel.textContent = total > 0 ? `${total} chapters` : "";
   } else {
-    barFill.style.width = "100%";
-    barFill.style.animation = "none";
-    statusLabel.innerHTML = `<span class="spin"></span> Locating chapters…`;
-    chapterLabel.textContent = "";
+    statusLabel.textContent = snap.status;
+    chapterLabel.textContent = total > 0 ? `${total} chapters` : "";
   }
 
   const badges = [];
@@ -711,7 +852,7 @@ function render(snap) {
   stats.innerHTML = badges.join(" ");
 
   renderChapters(snap.chapters || [], snap.currentChapter);
-  renderLog(snap.log);
+  renderLog(snap.log, state);
 
   if (snap.downloadUrl) {
     show(downloadBox);
@@ -719,6 +860,22 @@ function render(snap) {
     downloadLink.textContent = snap.partialDownload ? "Download partial PDF" : "Download PDF";
   } else {
     hide(downloadBox);
+  }
+
+  if (!archived && snap.status === "running") {
+    show(jobActionsBox);
+    pauseBtn.textContent = snap.userPaused ? "Resume export" : "Pause export";
+  } else {
+    hide(jobActionsBox);
+  }
+
+  if (!archived && snap.status === "complete" && snap.retryable?.length > 0) {
+    show(retryBox);
+    retryBtn.textContent = snap.tempCleaned
+      ? "Rebuild PDF from source"
+      : `Retry ${snap.retryable.length} failed chapter(s)`;
+  } else {
+    hide(retryBox);
   }
 }
 
@@ -747,9 +904,8 @@ function renderChapters(chapters, activeChapter) {
     const holder = row.querySelector(".ch-bar-holder");
     const statusEl = row.querySelector(".ch-status");
 
-    const label = ch.prologue
-      ? "Prologue"
-      : `Chapter ${ch.label !== undefined && ch.label !== null ? ch.label : ch.chapter}`;
+    const rawLabel = ch.label !== undefined && ch.label !== null ? ch.label : ch.chapter;
+    const label = ch.prologue ? "Prologue" : /^(chapter|prologue)\b/i.test(String(rawLabel)) ? String(rawLabel) : `Chapter ${rawLabel}`;
     num.textContent = label;
     provider.textContent = ch.provider || "";
 
@@ -781,11 +937,42 @@ function renderChapters(chapters, activeChapter) {
   if (activeRow) activeRow.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
-async function startScrape(firstChapterUrl) {
+function scheduleAutoDiscovery() {
+  if (autoDiscoverTimer) clearTimeout(autoDiscoverTimer);
+  const generation = ++discoveryGeneration;
+  const draft = activeDraft();
+  if (!draft) return;
+  const value = urlInput.value.trim();
+  if (draft.url !== value) resetComposer();
+  draft.url = value;
+  draft.error = null;
+  draft.phase = value ? "ready" : "blank";
+  draft.title = draftTitleFromUrl(value);
+  syncActiveDraft();
+  if (!value || !isValidHttpUrl(value)) return;
+  autoDiscoverTimer = setTimeout(() => {
+    if (generation !== discoveryGeneration) return;
+    const current = activeDraft();
+    if (!current || current.id !== draft.id || current.url !== value) return;
+    startScrape(null, { auto: true });
+  }, 700);
+}
+
+async function startScrape(firstChapterUrl, { auto = false } = {}) {
+  const generation = ++discoveryGeneration;
+  if (!auto) archiveRerun = null;
   clearError();
-  resetActivity();
+  resetComposer();
 
   const url = urlInput.value.trim();
+  const draft = activeDraft();
+  if (draft) {
+    draft.url = url;
+    draft.error = null;
+    draft.phase = url ? "ready" : "blank";
+    draft.title = draftTitleFromUrl(url);
+    syncActiveDraft();
+  }
   if (!url) return;
 
   let body;
@@ -793,12 +980,15 @@ async function startScrape(firstChapterUrl) {
     body = requestBody({ url, firstChapterUrl: firstChapterUrl || undefined });
   } catch (err) {
     setError(err.message);
+    markActiveDraftError(err.message);
     openSettings();
     return;
   }
 
-  startBtn.disabled = true;
-  startBtn.textContent = "Finding chapters…";
+  if (!auto) {
+    startBtn.disabled = true;
+    startBtn.textContent = "Finding chapters…";
+  }
 
   try {
     const res = await fetch("/api/discover", {
@@ -807,7 +997,11 @@ async function startScrape(firstChapterUrl) {
       body: JSON.stringify(body),
     });
     const result = await readJson(res);
+    if (generation !== discoveryGeneration) return;
     if (!res.ok) {
+      const message = result.error || "Could not find chapters.";
+      if (archiveRerun?.generation === generation) archiveRerun = null;
+      markActiveDraftError(message);
       handleErrorResponse(res, result);
       return;
     }
@@ -843,45 +1037,965 @@ async function startScrape(firstChapterUrl) {
     if (reviewState.chapters.length === 0) {
       setError("No chapters found. Try a direct chapter link or add one manually.");
     }
+    if (draft?.draft && activeJobId === draft.id) {
+      draft.title = `Job - ${result.title || hostLabel(url)}`;
+      draft.phase = "review";
+      draft.error = null;
+    }
     renderReviewChapters();
     show(sourcesPanel);
     fitSourceTitle();
+    syncActiveDraft();
+    if (archiveRerun?.generation === generation) applyArchiveRerun();
   } catch (err) {
+    if (generation !== discoveryGeneration) return;
+    if (archiveRerun?.generation === generation) archiveRerun = null;
+    markActiveDraftError("Network error while finding chapters.");
     debugClient("error", `POST /api/discover: ${err.message}`);
     setError("Network error while finding chapters.");
   } finally {
-    startBtn.disabled = false;
-    startBtn.textContent = "Find chapters";
+    if (!auto && generation === discoveryGeneration) {
+      startBtn.disabled = false;
+      startBtn.textContent = "Find chapters";
+    }
   }
 }
 
-async function startJob(payload) {
-  startBtn.disabled = true;
-  startBtn.textContent = "Starting…";
+function cloneValue(value) {
+  return value === null || value === undefined ? null : JSON.parse(JSON.stringify(value));
+}
 
+function hostLabel(value) {
   try {
-    const res = await fetch("/api/scrape", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const body = await readJson(res);
-    if (!res.ok) {
-      handleErrorResponse(res, body);
-      return;
+    return new URL(value).hostname.replace(/^www\./, "");
+  } catch {
+    return "New Job";
+  }
+}
+
+function draftTitleFromUrl(value) {
+  return value ? `Job - ${hostLabel(value)}` : "New Job";
+}
+
+function activeDraft() {
+  const state = jobs.get(activeJobId);
+  return state?.draft ? state : null;
+}
+
+function serializeSources(state) {
+  if (!state) return null;
+  return {
+    token: state.token,
+    order: [...state.order],
+    enabled: [...state.enabled],
+    overrides: { ...state.overrides },
+    providers: [...state.providers.entries()],
+    chapters: cloneValue(state.chapters),
+    defaults: { ...state.defaults },
+    partEnabled: [...state.partEnabled.entries()],
+    disabledParts: [...state.disabledParts],
+  };
+}
+
+function hydrateSources(data) {
+  if (!data) return null;
+  return {
+    token: data.token,
+    order: [...(data.order || [])],
+    enabled: new Set(data.enabled || []),
+    overrides: { ...(data.overrides || {}) },
+    providers: new Map(data.providers || []),
+    chapters: cloneValue(data.chapters) || [],
+    defaults: { ...(data.defaults || {}) },
+    partEnabled: new Map(data.partEnabled || []),
+    disabledParts: new Set(data.disabledParts || []),
+  };
+}
+
+function sanitizeArchiveDetail(snap) {
+  if (!snap) return null;
+  return {
+    title: snap.title || null,
+    slug: snap.slug || null,
+    kind: snap.kind || null,
+    status: snap.status || null,
+    phase: snap.phase || null,
+    paused: Boolean(snap.paused),
+    userPaused: Boolean(snap.userPaused),
+    currentChapter: snap.currentChapter ?? null,
+    firstChapter: snap.firstChapter ?? null,
+    lastChapter: snap.lastChapter ?? null,
+    startChapter: snap.startChapter ?? null,
+    endChapter: snap.endChapter ?? null,
+    totalChapters: snap.totalChapters ?? null,
+    completedChapters: snap.completedChapters ?? 0,
+    pages: snap.pages ?? 0,
+    skipped: snap.skipped ?? 0,
+    locked: snap.locked ?? 0,
+    downloadUrl: snap.downloadUrl || null,
+    partialDownload: Boolean(snap.partialDownload),
+    retryable: Array.isArray(snap.retryable) ? snap.retryable.slice(0, 100) : [],
+    tempCleaned: Boolean(snap.tempCleaned),
+    finishedAt: snap.finishedAt || null,
+    error: snap.error || null,
+    chapters: (snap.chapters || []).slice(-100).map((chapter) => ({ ...chapter })),
+    log: (snap.log || []).slice(-100).map((entry) =>
+      typeof entry === "string" ? entry : { ...entry },
+    ),
+  };
+}
+
+function sanitizeArchivePayload(payload) {
+  const copy = cloneValue(payload) || {};
+  delete copy.discoveryToken;
+  return copy;
+}
+
+function sanitizeArchiveReview(state) {
+  if (!state) return null;
+  return {
+    chapters: (state.chapters || []).map((chapter) => ({
+      key: chapter.key,
+      number: chapter.number,
+      label: chapter.label,
+      url: chapter.url,
+      customUrl: chapter.customUrl,
+      added: Boolean(chapter.added),
+    })),
+    overrides: { ...(state.overrides || {}) },
+    detectedCoverUrl: state.detectedCoverUrl || null,
+    appliedCoverUrl: state.appliedCoverUrl || null,
+  };
+}
+
+function sanitizeArchiveSources(state) {
+  if (!state) return null;
+  return {
+    order: [...(state.order || [])],
+    enabled: [...(state.enabled || [])],
+    overrides: { ...(state.overrides || {}) },
+    defaults: { ...(state.defaults || {}) },
+    disabledParts: [...(state.disabledParts || [])],
+  };
+}
+
+function archivePayloadFromDraft(draft) {
+  if (!draft?.url) return null;
+  const payload = {
+    ...draft.settings,
+    url: draft.url,
+    settings: { ...draft.settings },
+  };
+  if (draft.review) {
+    payload.chapterUrlOverrides = { ...(draft.review.overrides || {}) };
+    payload.addedChapters = (draft.review.chapters || [])
+      .filter((chapter) => chapter.added)
+      .map((chapter) => ({
+        number: chapter.number,
+        url: chapter.customUrl || chapter.url,
+        label: chapter.label,
+      }));
+    payload.coverUrl = draft.review.appliedCoverUrl || draft.review.detectedCoverUrl || undefined;
+  }
+  if (draft.sources) {
+    payload.sourceOrder = [...(draft.sources.order || [])];
+    payload.enabledSourceIds = [...(draft.sources.enabled || [])];
+    payload.chapterOverrides = { ...(draft.sources.overrides || {}) };
+    payload.excludedPartKeys = [...(draft.sources.disabledParts || [])];
+  }
+  return payload;
+}
+
+function loadArchive() {
+  let data = [];
+  try {
+    data = JSON.parse(localStorage.getItem(ARCHIVE_KEY) || "[]");
+  } catch {}
+  if (!Array.isArray(data)) return [];
+  return data
+    .filter((record) => record && record.id)
+    .sort((a, b) => (b.finishedAt || b.createdAt || 0) - (a.finishedAt || a.createdAt || 0));
+}
+
+function persistArchive(records) {
+  try {
+    localStorage.setItem(ARCHIVE_KEY, JSON.stringify(records.slice(0, ARCHIVE_LIMIT)));
+  } catch {}
+}
+
+function archiveRecord(id) {
+  return loadArchive().find((record) => record.id === id) || null;
+}
+
+function upsertArchiveRecord(record) {
+  const records = loadArchive();
+  const index = records.findIndex((entry) => entry.id === record.id);
+  if (index >= 0) records[index] = { ...records[index], ...record };
+  else records.unshift(record);
+  persistArchive(records);
+  renderArchive();
+}
+
+function captureArchiveStart(jobId, payload, draft) {
+  const url = payload.url || draft?.url || "";
+  upsertArchiveRecord({
+    id: jobId,
+    url,
+    title: pendingDiscovery?.title
+      ? `Job - ${pendingDiscovery.title}`
+      : draft?.title || draftTitleFromUrl(url),
+    status: "queued",
+    kind: pendingDiscovery?.detectedKind || "generic",
+    createdAt: Date.now(),
+    finishedAt: null,
+    downloadUrl: null,
+    settings: { ...DEFAULT_SETTINGS, ...settings },
+    startChapter: payload.startChapter ?? settings.startChapter ?? null,
+    endChapter: payload.endChapter ?? settings.endChapter ?? null,
+    firstChapterUrl: payload.firstChapterUrl || null,
+    payload: sanitizeArchivePayload(payload),
+    review: sanitizeArchiveReview(reviewState),
+    sources: sanitizeArchiveSources(sourceState),
+  });
+}
+
+function updateArchiveFromSnapshot(snap) {
+  const record = archiveRecord(snap.id) || {
+    id: snap.id,
+    createdAt: snap.createdAt || Date.now(),
+    finishedAt: null,
+    url: "",
+    title: "Untitled export",
+    settings: { ...settings },
+    payload: null,
+  };
+  record.title = snap.title || record.title || "Untitled export";
+  record.status = snap.status || record.status;
+  record.kind = snap.kind || record.kind;
+  record.paused = Boolean(snap.paused);
+  record.detail = sanitizeArchiveDetail(snap);
+  record.downloadUrl = snap.downloadUrl || record.downloadUrl || null;
+  record.totalChapters = snap.totalChapters ?? record.totalChapters;
+  if ((snap.status === "complete" || snap.status === "failed") && !record.finishedAt) {
+    record.finishedAt = snap.finishedAt || Date.now();
+  }
+  upsertArchiveRecord(record);
+}
+
+function archiveDownloadValid(record) {
+  return Boolean(
+    record.downloadUrl && record.finishedAt && Date.now() - record.finishedAt < ARCHIVE_TTL_MS,
+  );
+}
+
+async function archiveJob(id, { pause = false } = {}) {
+  const state = jobs.get(id);
+  if (!state || state.archived) return;
+  let pausedByArchive = false;
+  if (
+    pause &&
+    !state.draft &&
+    state.snap?.status === "running" &&
+    !state.snap.userPaused
+  ) {
+    pausedByArchive = true;
+    try {
+      const res = await fetch(`/api/jobs/${id}/pause`, { method: "POST" });
+      if (res.ok) handleSnapshot(await readJson(res));
+    } catch (err) {
+      debugClient("warn", `Could not pause ${id} before archiving: ${err.message}`);
     }
-    hide(firstChapterBox);
-    hide(sourcesPanel);
-    activeJobId = body.jobId;
-    show(progressBox);
-    connectJobEvents(body.jobId);
-    poll(body.jobId);
+  }
+  const snap = state.snap;
+  const record = archiveRecord(id) || {
+    id,
+    title: snap?.title || state.title || "Untitled export",
+    url: state.draft ? state.url || "" : "",
+    status: snap?.status || state.status || "draft",
+    kind: snap?.kind || null,
+    createdAt: snap?.createdAt || state.createdAt || Date.now(),
+    finishedAt: snap?.status === "complete" || snap?.status === "failed"
+      ? snap.finishedAt || Date.now()
+      : null,
+    downloadUrl: snap?.downloadUrl || null,
+    paused: pausedByArchive || Boolean(snap?.paused),
+    detail: sanitizeArchiveDetail(snap),
+    totalChapters: snap?.totalChapters || state.chapterCount || 0,
+    settings: state.draft ? { ...state.settings } : { ...settings },
+    payload: state.draft ? archivePayloadFromDraft(state) : null,
+    review: state.draft ? sanitizeArchiveReview(state.review) : null,
+    sources: state.draft ? sanitizeArchiveSources(state.sources) : null,
+  };
+  if (snap) {
+    record.title = snap.title || record.title;
+    record.status = snap.status;
+    record.downloadUrl = snap.downloadUrl || record.downloadUrl;
+    record.paused = pausedByArchive || Boolean(snap.paused);
+    record.detail = sanitizeArchiveDetail(snap);
+    record.totalChapters = snap.totalChapters ?? record.totalChapters;
+    if ((snap.status === "complete" || snap.status === "failed") && !record.finishedAt) {
+      record.finishedAt = snap.finishedAt || Date.now();
+    }
+  }
+  state.archived = true;
+  upsertArchiveRecord(record);
+  removeJob(id);
+  if (jobs.size === 0) {
+    if (autoDiscoverTimer) clearTimeout(autoDiscoverTimer);
+    archiveRerun = null;
+    activeArchiveId = null;
+    discoveryGeneration += 1;
+    clearError();
+    resetComposer();
+    urlInput.value = "";
+    createDraftJob();
+  }
+}
+
+function openArchivedJob(id) {
+  const record = archiveRecord(id);
+  if (!record) return;
+  if (autoDiscoverTimer) clearTimeout(autoDiscoverTimer);
+  archiveRerun = null;
+  discoveryGeneration += 1;
+  clearError();
+  const draft = createDraftJob({ select: false });
+  draft.url = record.url || "";
+  draft.title = record.title || draftTitleFromUrl(draft.url);
+  draft.settings = normalizedSettings(record.settings);
+  draft.review = cloneValue(record.review);
+  draft.sources = hydrateSources(record.sources);
+  draft.coverUrl = record.review?.appliedCoverUrl || record.review?.detectedCoverUrl || null;
+  draft.chapterCount = record.totalChapters || record.review?.chapters?.length || 0;
+  draft.detail = cloneValue(record.detail);
+  draft.archivedFrom = id;
+  selectJob(draft.id);
+  activeArchiveId = id;
+  renderArchive();
+}
+
+function deleteArchivedJob(id) {
+  persistArchive(loadArchive().filter((record) => record.id !== id));
+  for (const state of jobs.values()) {
+    if (state.archivedFrom === id) state.archivedFrom = null;
+  }
+  if (activeArchiveId === id) activeArchiveId = null;
+  persistDrafts();
+  renderArchive();
+}
+
+function openArchiveDeleteModal(id) {
+  const record = archiveRecord(id);
+  if (!record) return;
+  pendingArchiveDeleteId = id;
+  archiveDeleteText.textContent = `Delete "${record.title || "Untitled export"}" from this browser's archive?`;
+  show(archiveDeleteModal);
+  archiveDeleteConfirm.focus();
+}
+
+function closeArchiveDeleteModal() {
+  pendingArchiveDeleteId = null;
+  hide(archiveDeleteModal);
+}
+
+function renderArchive() {
+  if (!archiveListBox) return;
+  const records = loadArchive();
+  if (archiveCount) archiveCount.textContent = String(records.length);
+  if (records.length === 0) {
+    archiveListBox.innerHTML = '<div class="jobs-empty">No archived jobs yet.</div>';
+    return;
+  }
+  const rows = [];
+  for (const record of records) {
+    const statusText =
+      record.status === "complete"
+        ? "✓ Done"
+        : record.status === "failed"
+          ? "Failed"
+          : record.status === "running"
+            ? record.paused
+              ? "Paused"
+              : "Running"
+            : "Archived";
+    const statusClass =
+      record.status === "complete"
+        ? "done"
+        : record.status === "failed"
+          ? "failed"
+          : record.status === "running" && record.paused
+            ? "paused"
+            : "";
+    const actions = [];
+    if (archiveDownloadValid(record)) {
+      actions.push(
+        `<a class="archive-row-download" href="${escapeHtml(record.downloadUrl)}" data-archive-download="${escapeHtml(record.id)}" download>Download PDF</a>`,
+      );
+    } else if (record.url) {
+      actions.push(
+        `<button type="button" class="archive-row-rerun" data-archive-rerun="${escapeHtml(record.id)}">Rerun</button>`,
+      );
+    }
+    actions.push(
+      `<button type="button" class="archive-row-delete" data-archive-delete="${escapeHtml(record.id)}" aria-label="Delete archived job" title="Delete archived job">×</button>`,
+    );
+    rows.push(`<div class="archive-row ${activeArchiveId === record.id ? "selected" : ""}" data-id="${escapeHtml(record.id)}" role="button" tabindex="0">
+      <span class="archive-row-title" title="${escapeHtml(record.title)}">${escapeHtml(record.title)}</span>
+      <span class="archive-row-status ${statusClass}">${escapeHtml(statusText)}</span>
+      <span class="archive-row-actions">${actions.join("")}</span>
+    </div>`);
+  }
+  archiveListBox.innerHTML = rows.join("");
+  for (const row of archiveListBox.querySelectorAll(".archive-row")) {
+    row.addEventListener("click", () => openArchivedJob(row.dataset.id));
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openArchivedJob(row.dataset.id);
+    });
+  }
+  for (const link of archiveListBox.querySelectorAll("[data-archive-download]")) {
+    link.addEventListener("click", (event) => event.stopPropagation());
+    link.addEventListener("keydown", (event) => event.stopPropagation());
+  }
+  for (const button of archiveListBox.querySelectorAll("[data-archive-rerun]")) {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      rerunArchivedJob(button.dataset.archiveRerun);
+    });
+    button.addEventListener("keydown", (event) => event.stopPropagation());
+  }
+  for (const button of archiveListBox.querySelectorAll("[data-archive-delete]")) {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openArchiveDeleteModal(button.dataset.archiveDelete);
+    });
+    button.addEventListener("keydown", (event) => event.stopPropagation());
+  }
+}
+
+function rerunArchivedJob(id) {
+  const record = archiveRecord(id);
+  if (!record) return;
+  if (!record.url) {
+    setError("No saved URL for this archived job.");
+    return;
+  }
+  clearError();
+  if (autoDiscoverTimer) clearTimeout(autoDiscoverTimer);
+  const draft = createDraftJob({ select: true });
+  draft.url = record.url;
+  draft.settings = { ...DEFAULT_SETTINGS, ...(record.settings || {}) };
+  draft.title = record.title || draftTitleFromUrl(record.url);
+  urlInput.value = record.url;
+  settings = normalizedSettings(draft.settings);
+  draftSettings = { ...settings };
+  renderSettings();
+  archiveRerun = {
+    generation: discoveryGeneration + 1,
+    review: cloneValue(record.review),
+    sources: cloneValue(record.sources),
+    payload: cloneValue(record.payload),
+  };
+  syncActiveDraft();
+  startScrape(null, { auto: true });
+}
+
+function applyArchiveRerun() {
+  const rerun = archiveRerun;
+  if (!rerun) return;
+  archiveRerun = null;
+  if (reviewState && rerun.review) {
+    for (const saved of rerun.review.chapters || []) {
+      const target =
+        (reviewState.chapters || []).find((chapter) => saved.key && chapter.key === saved.key) ||
+        (reviewState.chapters || []).find(
+          (chapter) => saved.number != null && Number(chapter.number) === Number(saved.number),
+        );
+      if (target) {
+        if (saved.customUrl) target.customUrl = saved.customUrl;
+        if (saved.added) {
+          target.added = true;
+          target.label = saved.label || target.label;
+        }
+      } else if (saved.added && saved.url) {
+        reviewState.chapters.push({ ...saved, customUrl: saved.customUrl || saved.url });
+      }
+    }
+    const cover = rerun.review.appliedCoverUrl || rerun.payload?.coverUrl;
+    if (cover && isValidHttpUrl(cover)) {
+      reviewState.appliedCoverUrl = cover;
+      reviewCoverUrlInput.value = cover;
+      setCoverApplyStatus("Cover applied", true);
+    }
+  }
+  if (sourceState && rerun.sources) {
+    if (rerun.sources.order?.length) sourceState.order = [...rerun.sources.order];
+    if (rerun.sources.enabled) sourceState.enabled = new Set(rerun.sources.enabled);
+    if (rerun.sources.overrides) sourceState.overrides = { ...rerun.sources.overrides };
+    if (rerun.sources.disabledParts) {
+      sourceState.disabledParts = new Set(rerun.sources.disabledParts);
+      initializePartState(sourceState);
+      for (const key of sourceState.partEnabled.keys()) {
+        sourceState.partEnabled.set(key, !sourceState.disabledParts.has(key));
+      }
+    }
+  }
+  renderReviewChapters();
+  if (sourceState) {
+    renderSourceList();
+    renderChapterSourceList();
+  }
+  syncActiveDraft();
+  let payload;
+  try {
+    payload = buildScrapePayload();
   } catch (err) {
-    debugClient("error", `POST /api/scrape: ${err.message}`);
-    setError("Network error while starting the job.");
+    setError(err.message);
+    return;
+  }
+  startJob(payload);
+}
+
+function serializeDraft(state) {
+  return {
+    id: state.id,
+    draft: true,
+    title: state.title || "New Job",
+    url: state.url || "",
+    settings: { ...state.settings },
+    discovery: cloneValue(state.discovery),
+    review: cloneValue(state.review),
+    sources: serializeSources(state.sources),
+    coverUrl: state.coverUrl || null,
+    chapterCount: state.chapterCount || 0,
+    detail: cloneValue(state.detail),
+    archivedFrom: state.archivedFrom || null,
+    phase: state.phase || "blank",
+    error: state.error || null,
+    createdAt: state.createdAt,
+    updatedAt: state.updatedAt,
+  };
+}
+
+function persistDrafts() {
+  const data = {};
+  for (const [id, state] of jobs) {
+    if (state.draft) data[id] = serializeDraft(state);
+  }
+  try {
+    sessionStorage.setItem(DRAFTS_KEY, JSON.stringify(data));
+  } catch {}
+}
+
+function restoreDrafts() {
+  let data = {};
+  try {
+    data = JSON.parse(sessionStorage.getItem(DRAFTS_KEY) || "{}");
+  } catch {}
+  if (!data || typeof data !== "object" || Array.isArray(data)) return;
+  for (const [id, record] of Object.entries(data)) {
+    if (!id.startsWith("draft:") || jobs.has(id)) continue;
+    jobs.set(id, {
+      ...record,
+      id,
+      draft: true,
+      status: "draft",
+      logSeen: new Set(),
+      settings: { ...DEFAULT_SETTINGS, ...(record.settings || {}) },
+    });
+  }
+}
+
+function createDraftJob({ select = true } = {}) {
+  const id = `draft:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const now = Date.now();
+  const state = {
+    id,
+    draft: true,
+    status: "draft",
+    title: "New Job",
+    url: "",
+    settings: { ...DEFAULT_SETTINGS },
+    discovery: null,
+    review: null,
+    sources: null,
+    coverUrl: null,
+    chapterCount: 0,
+    detail: null,
+    archivedFrom: null,
+    phase: "blank",
+    error: null,
+    createdAt: now,
+    updatedAt: now,
+    logSeen: new Set(),
+  };
+  jobs.set(id, state);
+  persistJobs();
+  persistDrafts();
+  renderJobsList();
+  if (select) selectJob(id);
+  return state;
+}
+
+function syncActiveDraft() {
+  const draft = activeDraft();
+  if (!draft) return;
+  draft.url = urlInput.value.trim();
+  draft.discovery = cloneValue(pendingDiscovery);
+  draft.review = cloneValue(reviewState);
+  draft.sources = serializeSources(sourceState);
+  draft.coverUrl = reviewState?.appliedCoverUrl || reviewState?.detectedCoverUrl || null;
+  draft.chapterCount = reviewState?.chapters?.length || pendingDiscovery?.chapters?.length || 0;
+  if (pendingDiscovery?.title) draft.title = `Job - ${pendingDiscovery.title}`;
+  else if (draft.url && draft.title === "New Job") draft.title = draftTitleFromUrl(draft.url);
+  else if (!draft.url) draft.title = "New Job";
+  if (draft.phase !== "error") {
+    draft.phase = draft.review ? "review" : draft.url ? "ready" : "blank";
+  }
+  draft.updatedAt = Date.now();
+  persistDrafts();
+  persistJobs();
+  renderJobsList();
+}
+
+function markActiveDraftError(message) {
+  const draft = activeDraft();
+  if (!draft) return;
+  draft.phase = "error";
+  draft.error = message;
+  syncActiveDraft();
+}
+
+function hydrateDraftIntoComposer(state) {
+  clearError();
+  resetComposer();
+  urlInput.value = state.url || "";
+  const savedSettings = normalizedSettings(state.settings);
+  settings = savedSettings;
+  draftSettings = { ...savedSettings };
+  renderSettings();
+  pendingDiscovery = cloneValue(state.discovery);
+  reviewState = cloneValue(state.review);
+  sourceState = hydrateSources(state.sources);
+  if (state.detail) {
+    renderDetail(state.detail, { logSeen: new Set() }, { archived: true });
+  } else {
+    resetDetailState();
+  }
+  if (!reviewState) return;
+  detectedKind.textContent = kindLabel(pendingDiscovery?.detectedKind);
+  show(detectedBox);
+  reviewCoverUrlInput.value = reviewState.appliedCoverUrl || reviewState.detectedCoverUrl || "";
+  renderReviewChapters();
+  show(sourcesPanel);
+  if (sourceState) {
+    show(sourceControls);
+    show(sourcesAuto);
+    sourcesTitle.textContent = pendingDiscovery?.title || "this series";
+    sourcesSummary.textContent = `${sourceState.chapters.length} chapters · ${sourceState.providers.size} providers`;
+    renderSourceList();
+    renderChapterSourceList();
+  } else {
+    hide(sourceControls);
+    hide(sourcesAuto);
+    sourcesTitle.textContent = pendingDiscovery?.title || "this series";
+    sourcesSummary.textContent = `${reviewState.chapters.length} chapters found`;
+  }
+}
+
+function convertDraftToServerJob(draftId, serverId) {
+  const entries = [...jobs.entries()];
+  const index = entries.findIndex(([id]) => id === draftId);
+  const realState = { id: serverId, logSeen: new Set(), status: null };
+  if (index >= 0) entries.splice(index, 1, [serverId, realState]);
+  else entries.push([serverId, realState]);
+  jobs.clear();
+  for (const [id, state] of entries) jobs.set(id, state);
+  activeJobId = serverId;
+  persistJobs();
+  persistDrafts();
+}
+
+function persistJobs() {
+  try {
+    sessionStorage.setItem(JOBS_KEY, JSON.stringify([...jobs.keys()]));
+    if (activeJobId) sessionStorage.setItem(ACTIVE_JOB_KEY, activeJobId);
+    else sessionStorage.removeItem(ACTIVE_JOB_KEY);
+  } catch {}
+}
+
+function restoreJobs() {
+  restoreDrafts();
+  let ids = [];
+  try {
+    ids = JSON.parse(sessionStorage.getItem(JOBS_KEY) || "[]");
+  } catch {}
+  if (!Array.isArray(ids)) ids = [];
+  for (const id of ids) {
+    if (typeof id === "string" && !jobs.has(id)) {
+      jobs.set(id, { id, logSeen: new Set(), status: null });
+    }
+  }
+  if (jobs.size === 0) createDraftJob({ select: false });
+  let active = null;
+  try {
+    active = sessionStorage.getItem(ACTIVE_JOB_KEY);
+  } catch {}
+  if (!active || !jobs.has(active)) active = [...jobs.keys()][jobs.size - 1];
+  selectJob(active);
+  pollAllJobs();
+}
+
+function jobState(id) {
+  let state = jobs.get(id);
+  if (!state) {
+    state = { id, logSeen: new Set(), status: null };
+    jobs.set(id, state);
+  }
+  return state;
+}
+
+function removeJob(id) {
+  const wasActive = activeJobId === id;
+  jobs.delete(id);
+  if (wasActive) {
+    activeJobId = null;
+    closeJobEvents();
+    resetDetailState();
+  }
+  const remaining = [...jobs.keys()];
+  if (wasActive && remaining.length > 0) selectJob(remaining[remaining.length - 1]);
+  persistJobs();
+  persistDrafts();
+  renderJobsList();
+}
+
+function jobStatusText(snap) {
+  if (snap.status === "running" && snap.paused) return "Paused";
+  if (snap.status === "complete") return "✓ Done";
+  if (snap.status === "failed") return "Failed";
+  return snap.status;
+}
+
+function jobRowMeta(snap) {
+  const total = snap.totalChapters || 0;
+  const done = snap.completedChapters ?? 0;
+  if (snap.status === "complete") return `${total} chapters`;
+  if (snap.status === "failed") return snap.error || "Failed";
+  if (snap.currentChapter === null || snap.currentChapter === undefined) {
+    if (snap.phase === "discovering") return "Locating chapters…";
+    return total > 0 ? `${done} / ${total} chapters` : "Preparing…";
+  }
+  if (total === 0) return currentChapterText(snap);
+  return `${currentChapterText(snap)} / Max chap ${maxChapterNumber(snap)}`;
+}
+
+function renderThrottleStatus(snap) {
+  const throttle = snap?.throttle;
+  if (!throttleStatusBox) return;
+  if (!throttle) {
+    hide(throttleStatusBox);
+    return;
+  }
+  show(throttleStatusBox);
+  if (throttleProfileLabel) throttleProfileLabel.textContent = throttle.label || "Balanced";
+  if (throttleDetailLabel) {
+    throttleDetailLabel.textContent =
+      `${throttle.effectiveConcurrency} chapters · ${throttle.effectiveImageConcurrency} images/host · ${throttle.pageDelayMs}ms`;
+  }
+  if (throttleCooldownLabel) {
+    const cooling = Boolean(throttle.rateLimited || throttle.cooldownRemainingMs > 0);
+    throttleCooldownLabel.classList.toggle("hidden", !cooling);
+    throttleCooldownLabel.textContent = throttle.cooldownRemainingMs > 0
+      ? `Cooling down ${Math.ceil(throttle.cooldownRemainingMs / 1000)}s…`
+      : "Backing off";
+  }
+}
+
+function renderJobsList() {
+  const activeStates = [...jobs.values()].filter((state) => state.snap?.status !== "complete");
+  if (activeStates.length === 0) {
+    jobsListBox.innerHTML = '<div class="jobs-empty">No exports yet.</div>';
+    if (throttleStatusBox) hide(throttleStatusBox);
+    renderArchive();
+    return;
+  }
+  const rows = [];
+  for (const state of activeStates) {
+    const snap = state.snap;
+    const id = state.id;
+    let title;
+    let statusText;
+    let statusClass = "";
+    let meta;
+    let pct = 0;
+    let showBar = false;
+    const actions = [];
+
+    if (state.draft) {
+      title = state.title || "New Job";
+      statusText = state.phase === "error" ? "Error" : "Not started";
+      statusClass = "draft";
+      meta = state.error || (state.url ? `${hostLabel(state.url)}${state.chapterCount ? ` · ${state.chapterCount} chapters` : ""}` : "Add a link to begin");
+    } else {
+      title = snap?.title || snap?.slug || "Untitled export";
+      const status = snap?.status || "queued";
+      statusText = snap ? jobStatusText(snap) : "Queued";
+      statusClass = snap?.paused ? "paused" : status === "complete" ? "done" : status === "failed" ? "failed" : "";
+      meta = snap ? jobRowMeta(snap) : "Waiting for status…";
+      pct = snap?.totalChapters
+        ? Math.min(1, (snap.completedChapters || 0) / snap.totalChapters) * 100
+        : 0;
+      showBar = status === "running";
+      if (snap?.downloadUrl) {
+        actions.push(`<a class="job-row-download" href="${escapeHtml(snap.downloadUrl)}" data-download="${escapeHtml(id)}">Download PDF</a>`);
+      }
+      if (status === "running") {
+        actions.push(`<button type="button" class="job-row-pause" data-pause="${escapeHtml(id)}">${snap?.userPaused ? "Resume" : "Pause"}</button>`);
+      }
+    }
+
+    actions.push(`<button type="button" class="job-row-archive" data-archive="${escapeHtml(id)}" aria-label="Archive job" title="Archive job">×</button>`);
+    rows.push(`<div class="job-row${id === activeJobId ? " selected" : ""}" data-id="${escapeHtml(id)}" role="button" tabindex="0">
+      <div class="job-row-top">
+        <span class="job-row-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+        <span class="job-row-status ${statusClass}">${escapeHtml(statusText)}</span>
+      </div>
+      <div class="job-row-meta">${escapeHtml(meta)}</div>
+      ${showBar ? `<div class="bar"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>` : ""}
+      <div class="job-row-actions">${actions.join("")}</div>
+    </div>`);
+  }
+  jobsListBox.innerHTML = rows.join("");
+
+  for (const row of jobsListBox.querySelectorAll(".job-row")) {
+    row.addEventListener("click", () => selectJob(row.dataset.id));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectJob(row.dataset.id);
+      }
+    });
+  }
+  for (const button of jobsListBox.querySelectorAll("[data-pause]")) {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      if (activeJobId !== button.dataset.pause) selectJob(button.dataset.pause);
+      await toggleJobPause();
+    });
+  }
+  for (const link of jobsListBox.querySelectorAll("[data-download]")) {
+    link.addEventListener("click", (event) => {
+      event.stopPropagation();
+      archiveJob(link.dataset.download);
+    });
+  }
+  for (const button of jobsListBox.querySelectorAll("[data-archive]")) {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await archiveJob(button.dataset.archive, { pause: true });
+    });
+  }
+  renderArchive();
+}
+
+function selectJob(id) {
+  if (!jobs.has(id)) return;
+  const changed = activeJobId !== id;
+  activeJobId = id;
+  activeArchiveId = null;
+  persistJobs();
+  if (changed) {
+    closeJobEvents();
+    resetDetailState();
+  }
+  const state = jobs.get(id);
+  if (state.draft) {
+    resetDetailState();
+    if (changed) hydrateDraftIntoComposer(state);
+    renderJobsList();
+    return;
+  }
+  if (changed) {
+    settings = { ...DEFAULT_SETTINGS };
+    draftSettings = { ...settings };
+    resetSettingsApplied();
+    renderSettings();
+  }
+  if (state.snap) {
+    renderDetail(state.snap, state);
+    renderThrottleStatus(state.snap);
+  }
+  renderJobsList();
+  if (state.snap?.status === "running" && (!jobEventSource || changed)) connectJobEvents(id);
+}
+
+function handleSnapshot(snap) {
+  const state = jobState(snap.id);
+  const previousStatus = state.status;
+  state.snap = snap;
+  state.status = snap.status;
+  updateArchiveFromSnapshot(snap);
+  if (previousStatus !== "failed" && snap.status === "failed") {
+    setError(snap.error || "Job failed.");
+  } else if (previousStatus === "failed" && snap.status !== "failed") {
+    clearError();
+  }
+  if (activeJobId === snap.id) renderDetail(snap, state);
+  renderThrottleStatus(snap);
+  renderJobsList();
+  if (snap.status !== "running" && activeJobId === snap.id) closeJobEvents();
+}
+
+async function fetchJobSnapshot(id) {
+  if (jobs.get(id)?.draft) return;
+  let res;
+  try {
+    res = await fetch(`/api/jobs/${id}`);
+  } catch (err) {
+    debugClient("warn", `Poll failed for ${id}: ${err.message}`);
+    return;
+  }
+  if (res.status === 404) {
+    removeJob(id);
+    return;
+  }
+  if (!res.ok) {
+    debugClient("warn", `GET /api/jobs/${id} responded ${res.status}`);
+    return;
+  }
+  try {
+    handleSnapshot(await res.json());
+  } catch (err) {
+    debugClient("warn", `Bad snapshot for ${id}: ${err.message}`);
+  }
+}
+
+function ensurePolling() {
+  if (jobsPollTimer) clearTimeout(jobsPollTimer);
+  const pollable = [...jobs.values()].filter((state) => !state.draft);
+  if (pollable.length === 0) {
+    jobsPollTimer = null;
+    return;
+  }
+  const hasActive = pollable.some((state) => !state.snap || state.snap.status === "running");
+  jobsPollTimer = setTimeout(pollAllJobs, hasActive ? 1000 : 3000);
+}
+
+async function pollAllJobs() {
+  if (pollingJobs) {
+    ensurePolling();
+    return;
+  }
+  pollingJobs = true;
+  try {
+    await Promise.all(
+      [...jobs.values()].filter((state) => !state.draft).map((state) => fetchJobSnapshot(state.id)),
+    );
   } finally {
-    startBtn.disabled = false;
-    startBtn.textContent = "Find chapters";
+    pollingJobs = false;
+    ensurePolling();
   }
 }
 
@@ -896,7 +2010,7 @@ function connectJobEvents(jobId) {
     } catch {
       return;
     }
-    handleSnapshot(snap, jobId);
+    handleSnapshot(snap);
   };
   source.onerror = () => {
     source.close();
@@ -912,53 +2026,73 @@ function closeJobEvents() {
   }
 }
 
-function handleSnapshot(snap, jobId) {
-  render(snap);
-  if (snap.status === "complete") {
-    show(downloadBox);
-    downloadLink.href = snap.downloadUrl || `/api/jobs/${jobId}/download`;
-    downloadLink.textContent = "Download PDF";
-    statusLabel.textContent = "Complete";
-    if (snap.retryable && snap.retryable.length > 0) {
-      show(retryBox);
-      retryBtn.textContent = `Retry ${snap.retryable.length} failed chapter(s)`;
-    } else {
-      hide(retryBox);
-    }
-    closeJobEvents();
-    return;
-  }
-  if (snap.status === "failed") {
-    setError(snap.error || "Job failed.");
-    statusLabel.textContent = "Failed";
-    closeJobEvents();
-    return;
-  }
-  hide(retryBox);
-}
-
-async function poll(jobId) {
-  if (pollTimer) clearTimeout(pollTimer);
-  let snap;
+async function toggleJobPause() {
+  if (!activeJobId) return;
+  const snap = jobs.get(activeJobId)?.snap;
+  if (!snap || snap.status !== "running") return;
+  const action = snap.userPaused ? "resume" : "pause";
+  pauseBtn.disabled = true;
   try {
-    const res = await fetch(`/api/jobs/${jobId}`);
+    const res = await fetch(`/api/jobs/${activeJobId}/${action}`, { method: "POST" });
+    const updated = await readJson(res);
     if (!res.ok) {
-      debugClient("error", `GET /api/jobs/${jobId} responded ${res.status}`);
-      setError("Job no longer exists (it may have expired).");
+      setError(updated.error || `Could not ${action} job.`);
       return;
     }
-    snap = await res.json();
+    handleSnapshot(updated);
   } catch (err) {
-    if (Date.now() - lastPollErrorAt > 10_000) {
-      lastPollErrorAt = Date.now();
-      debugClient("warn", `Poll failed: ${err.message}`);
-    }
-    pollTimer = setTimeout(() => poll(jobId), 1500);
-    return;
+    debugClient("error", `POST /api/jobs/${activeJobId}/${action}: ${err.message}`);
+    setError(`Network error while trying to ${action} the job.`);
+  } finally {
+    pauseBtn.disabled = false;
   }
+}
 
-  handleSnapshot(snap, jobId);
-  if (snap.status === "running") pollTimer = setTimeout(() => poll(jobId), 1000);
+async function startJob(payload) {
+  const draftId = activeDraft()?.id || null;
+  const draftState = draftId ? jobs.get(draftId) : null;
+  startBtn.disabled = true;
+  startBtn.textContent = "Starting…";
+
+  try {
+    const res = await fetch("/api/scrape", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await readJson(res);
+    if (!res.ok) {
+      const draft = draftId ? jobs.get(draftId) : null;
+      if (draft?.draft) {
+        draft.phase = "error";
+        draft.error = body.error || "Could not start export.";
+        syncActiveDraft();
+      }
+      handleErrorResponse(res, body);
+      return;
+    }
+    hide(firstChapterBox);
+    hide(sourcesPanel);
+    const id = body.jobId;
+    captureArchiveStart(id, payload, draftState);
+    if (draftId && jobs.get(draftId)?.draft) convertDraftToServerJob(draftId, id);
+    else jobState(id);
+    selectJob(id);
+    await fetchJobSnapshot(id);
+    ensurePolling();
+  } catch (err) {
+    const draft = draftId ? jobs.get(draftId) : null;
+    if (draft?.draft) {
+      draft.phase = "error";
+      draft.error = "Network error while starting the job.";
+      syncActiveDraft();
+    }
+    debugClient("error", `POST /api/scrape: ${err.message}`);
+    setError("Network error while starting the job.");
+  } finally {
+    startBtn.disabled = false;
+    startBtn.textContent = "Find chapters";
+  }
 }
 
 async function pollDebug() {
@@ -1001,6 +2135,8 @@ function connectDebugEvents() {
 }
 
 connectDebugEvents();
+renderArchive();
+restoreJobs();
 
 function renderSources(data) {
   sourceState = {
@@ -1058,6 +2194,7 @@ function renderSourceList() {
       renderChapterSourceList();
     });
   }
+  syncActiveDraft();
 }
 
 function orderedProviderIds() {
@@ -1117,8 +2254,10 @@ function renderChapterSourceList() {
   for (const select of chapterSourceListBox.querySelectorAll("select")) {
     select.addEventListener("change", () => {
       sourceState.overrides[select.dataset.chapter] = select.value;
+      syncActiveDraft();
     });
   }
+  syncActiveDraft();
 }
 
 async function retryJob() {
@@ -1138,8 +2277,9 @@ async function retryJob() {
     hide(downloadBox);
     hide(retryBox);
     clearError();
-    connectJobEvents(activeJobId);
-    poll(activeJobId);
+    await fetchJobSnapshot(activeJobId);
+    selectJob(activeJobId);
+    ensurePolling();
   } catch (err) {
     debugClient("error", `Retry request failed: ${err.message}`);
     setError("Network error while retrying.");
@@ -1150,8 +2290,43 @@ async function retryJob() {
 
 form.addEventListener("submit", (e) => {
   e.preventDefault();
+  if (autoDiscoverTimer) clearTimeout(autoDiscoverTimer);
+  archiveRerun = null;
   startScrape();
 });
+
+urlInput.addEventListener("input", scheduleAutoDiscovery);
+
+archiveToggle?.addEventListener("click", () => {
+  const willOpen = archiveListBox.classList.contains("hidden");
+  if (willOpen) show(archiveListBox);
+  else hide(archiveListBox);
+  archiveToggle.setAttribute("aria-expanded", String(willOpen));
+});
+
+archiveDeleteCancel?.addEventListener("click", () => closeArchiveDeleteModal());
+archiveDeleteConfirm?.addEventListener("click", () => {
+  if (!pendingArchiveDeleteId) return;
+  deleteArchivedJob(pendingArchiveDeleteId);
+  closeArchiveDeleteModal();
+});
+archiveDeleteModal?.addEventListener("click", (event) => {
+  if (event.target === archiveDeleteModal) closeArchiveDeleteModal();
+});
+
+jobsNewBtn.addEventListener("click", () => {
+  if (autoDiscoverTimer) clearTimeout(autoDiscoverTimer);
+  archiveRerun = null;
+  activeArchiveId = null;
+  discoveryGeneration += 1;
+  clearError();
+  resetComposer();
+  urlInput.value = "";
+  createDraftJob();
+  urlInput.focus();
+});
+
+pauseBtn.addEventListener("click", () => toggleJobPause());
 
 firstChapterForm.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -1186,6 +2361,7 @@ reviewCoverUrlInput.addEventListener("input", () => {
   } else {
     setCoverApplyStatus(detected ? "Using detected cover" : "No cover", Boolean(detected));
   }
+  syncActiveDraft();
 });
 
 sourcesAuto.addEventListener("click", () => {
@@ -1202,6 +2378,8 @@ sourcesAuto.addEventListener("click", () => {
 });
 
 sourcesCancel.addEventListener("click", () => {
+  if (autoDiscoverTimer) clearTimeout(autoDiscoverTimer);
+  discoveryGeneration += 1;
   hide(sourcesPanel);
   hide(sourceControls);
   hide(detectedBox);
@@ -1214,6 +2392,7 @@ sourcesCancel.addEventListener("click", () => {
   sourceState = null;
   startBtn.disabled = false;
   startBtn.textContent = "Find chapters";
+  syncActiveDraft();
 });
 
 sourcesStart.addEventListener("click", () => {
@@ -1222,28 +2401,11 @@ sourcesStart.addEventListener("click", () => {
     setError("This chapter preview expired. Search again.");
     return;
   }
+  syncActiveDraft();
 
   let payload;
   try {
-    const extra = {
-      discoveryToken: reviewState.token,
-      chapterUrlOverrides: { ...reviewState.overrides },
-      addedChapters: reviewState.chapters
-        .filter((chapter) => chapter.added)
-        .map((chapter) => ({
-          number: chapter.number,
-          url: chapter.customUrl || chapter.url,
-          label: chapter.label,
-        })),
-      coverUrl: reviewState.appliedCoverUrl || reviewState.detectedCoverUrl || undefined,
-    };
-    if (sourceState) {
-      extra.sourceOrder = [...sourceState.order];
-      extra.enabledSourceIds = [...sourceState.enabled];
-      extra.chapterOverrides = { ...sourceState.overrides };
-      extra.excludedPartKeys = [...sourceState.disabledParts];
-    }
-    payload = requestBody(extra);
+    payload = buildScrapePayload();
   } catch (err) {
     setError(err.message);
     openSettings();
@@ -1254,6 +2416,9 @@ sourcesStart.addEventListener("click", () => {
 });
 
 retryBtn.addEventListener("click", () => retryJob());
+downloadLink.addEventListener("click", () => {
+  if (activeJobId && !jobs.get(activeJobId)?.draft) archiveJob(activeJobId);
+});
 debugClearBtn.addEventListener("click", () => {
   debugLogBox.innerHTML = "";
 });

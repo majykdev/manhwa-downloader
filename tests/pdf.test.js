@@ -145,8 +145,8 @@ test("PdfBuilder writes a title page, clickable TOC, dividers, and image pages",
   assert.strictEqual(countPdfPages(out), 7);
   const sizes = pageSizes(builder);
   assert.deepStrictEqual(sizes[0], [390, 844]);
-  assert.deepStrictEqual(sizes[1], printerPageSize(sizeA));
-  assert.deepStrictEqual(sizes[4], printerPageSize(sizeB));
+  assert.deepStrictEqual(sizes[1], [sizeA[0], printerPageSize(sizeA)[1]]);
+  assert.deepStrictEqual(sizes[4], [sizeB[0], printerPageSize(sizeB)[1]]);
 
   const kids = builder.doc._root.data.Pages.data.Kids;
   const annots = kids[0].data.Annots;
@@ -158,6 +158,45 @@ test("PdfBuilder writes a title page, clickable TOC, dividers, and image pages",
   assert.ok(text.includes("Test Comic"));
   assert.ok(text.includes("Prologue"));
   assert.ok(text.includes("Chapter 1"));
+});
+
+test("PdfBuilder divider width matches images and keeps enlarged centered text", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "asura-divider-width-"));
+  const out = path.join(tmp, "out.pdf");
+  const wide = await makeWebp(400, 250, "rgb(40, 120, 200)");
+  const builder = new PdfBuilder(out, { compress: false });
+  const size = await builder.measurePageSize(wide);
+
+  const fontSizes = [];
+  const textCalls = [];
+  const oldFontSize = builder.doc.fontSize;
+  const oldText = builder.doc.text;
+  builder.doc.fontSize = function (size) {
+    fontSizes.push(size);
+    return oldFontSize.call(this, size);
+  };
+  builder.doc.text = function (...args) {
+    textCalls.push(args);
+    return oldText.apply(this, args);
+  };
+
+  builder.addSpacer("Chapter 1", size, "Chapters 1.1 + 1.2");
+  await builder.addImage(wide, size);
+  await builder.finish();
+
+  assert.deepStrictEqual(pageSizes(builder), [
+    [size[0], printerPageSize(size)[1]],
+    size,
+  ]);
+  assert.ok(fontSizes.includes(28));
+  assert.ok(fontSizes.includes(12));
+  assert.deepStrictEqual(
+    textCalls.map(([, x, , options]) => [x, options.align, options.width]),
+    [
+      [12, "center", size[0] - 24],
+      [12, "center", size[0] - 24],
+    ],
+  );
 });
 
 test("PdfBuilder keeps each image's natural height by default", async () => {
@@ -201,7 +240,7 @@ test("PdfBuilder normalizes a chapter to the first page size when requested", as
 
   assert.deepStrictEqual(pageSizes(builder), [
     [390, 844],
-    printerPageSize(sizeA),
+    [sizeA[0], printerPageSize(sizeA)[1]],
     [390, 585],
     [390, 585],
   ]);

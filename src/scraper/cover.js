@@ -3,6 +3,7 @@
 const cheerio = require("cheerio");
 
 const ASURA_SELECTORS = [
+  "#cover-viewer-img",
   "#desktop-cover-container > div.rounded-md.z-0.w-full.h-full.absolute.top-0.left-0 > img",
   "#desktop-cover-container img",
 ];
@@ -33,14 +34,28 @@ const CHAPTER_SEGMENT = /^(chapter|chap|ch|c|read|episode|ep)(?:[-_]?\d+)?$/i;
 const BAD_IMAGE_PATH =
   /(^|\/)(logo|icon|avatar|banner|advert|ads?|sponsor|button|sprite|placeholder)(\/|$)/i;
 const BAD_IMAGE_EXT = /\.(svg|ico)(\?.*)?$/i;
-const IMAGE_ATTRS = ["content", "href", "src", "data-src", "data-original", "data-lazy-src", "data-url"];
+const IMAGE_ATTRS = ["content", "href", "data-full-src", "src", "data-src", "data-original", "data-lazy-src", "data-url"];
+
+function normalizeCoverUrl(raw) {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const url = new URL(raw.trim());
+    if (!/^https?:$/.test(url.protocol)) return null;
+    if (/(^|\.)asurascans\.com$/i.test(url.hostname) && url.pathname.startsWith("/asura-images/covers/")) {
+      url.pathname = url.pathname.replace(/-400(\.[a-z0-9]+)$/i, "$1");
+    }
+    return url.href;
+  } catch {
+    return null;
+  }
+}
 
 function normalizeUrl(raw, base) {
   if (typeof raw !== "string" || !raw.trim()) return null;
   try {
     const url = new URL(raw.trim(), base);
     if (!/^https?:$/.test(url.protocol)) return null;
-    return url.href;
+    return normalizeCoverUrl(url.href);
   } catch {
     return null;
   }
@@ -185,4 +200,4 @@ function seriesPageUrl(raw) {
   }
 }
 
-module.exports = { extractCoverUrl, extractMetaCoverUrl, seriesPageUrl };
+module.exports = { extractCoverUrl, extractMetaCoverUrl, normalizeCoverUrl, seriesPageUrl };

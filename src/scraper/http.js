@@ -2,6 +2,7 @@
 
 const axios = require("axios");
 const config = require("../config");
+const { globalThrottle } = require("../jobs/globalThrottle");
 const { tlsFetch, isCloudflareBlock } = require("./tls");
 
 const UA =
@@ -29,11 +30,18 @@ function sleep(ms) {
  * On 403/429 (Cloudflare) it backs off longer; on 404 it retries a couple of
  * times before giving up (pages can 404 transiently during deploys).
  */
-async function fetchWithRetry(url, { attempts = 4, baseDelay = 800, onRetry, config: reqConfig = {} } = {}) {
+async function fetchWithRetry(url, {
+  attempts = 4,
+  baseDelay = 800,
+  onRetry,
+  config: reqConfig = {},
+  kind = "page",
+  minDelayMs = 0,
+} = {}) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await client.get(url, reqConfig);
+      const res = await globalThrottle.run(kind, url, () => client.get(url, reqConfig), { minDelayMs });
       return { status: res.status, data: res.data, headers: res.headers };
     } catch (err) {
       lastErr = err;
@@ -65,7 +73,7 @@ async function fetchWithRetry(url, { attempts = 4, baseDelay = 800, onRetry, con
   throw err;
 }
 
-async function downloadBuffer(url, { onRetry } = {}) {
+async function downloadBuffer(url, { onRetry, minDelayMs = 0 } = {}) {
   // responseType: "arraybuffer" keeps binary bytes intact (default decodes as
   // a utf-8 string, which corrupts WebP/JPEG payloads).
   const res = await fetchWithRetry(url, {
@@ -73,6 +81,8 @@ async function downloadBuffer(url, { onRetry } = {}) {
     baseDelay: 600,
     onRetry,
     config: { responseType: "arraybuffer" },
+    kind: "image",
+    minDelayMs,
   });
   return Buffer.from(res.data);
 }
@@ -83,11 +93,12 @@ async function downloadBuffer(url, { onRetry } = {}) {
  * cloudflareBlock, rendered }. Used by chapter fetchers that need real content
  * that JS-rendered sites only produce after executing client scripts.
  */
-async function fetchPageSmart(url, { attempts = 2, referer } = {}) {
+async function fetchPageSmart(url, { attempts = 2, referer, minDelayMs = 0 } = {}) {
   let res;
   try {
     res = await fetchWithRetry(url, {
       attempts,
+      minDelayMs,
       config: {
         ...(referer ? { headers: { Referer: referer } } : {}),
       },
@@ -98,10 +109,11 @@ async function fetchPageSmart(url, { attempts = 2, referer } = {}) {
 
   const bodyText = typeof res.data === "string" ? res.data : "";
   if (isCloudflareBlock(bodyText, res.status, res.headers) || res.status === 403) {
-    const tls = await tlsFetch(url, { referer });
+    const tls = await globalThrottle.run("page", url, () => tlsFetch(url, { referer }), { minDelayMs });
     if (tls && tls.status === 200 && !tls.cloudflareBlock && tls.data.length > 0) {
       return { status: 200, data: tls.data, headers: tls.headers, viaTLS: true };
     }
+    if (!tls || tls.cloudflareBlock || tls.status === 403) globalThrottle.reportRateLimit();
     return { status: res.status, data: Buffer.from(""), headers: res.headers, cloudflareBlock: true };
   }
 
