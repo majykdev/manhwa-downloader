@@ -44,9 +44,31 @@ function filterByChapterRange(items, getNumber, range = {}, options = {}) {
   return (items || []).filter((item) => inChapterRange(getNumber(item), range, options));
 }
 
+function findChapterGaps(expectedNumbers = [], seenNumbers = []) {
+  const expected = new Set();
+  const seen = new Set();
+  for (const value of expectedNumbers || []) {
+    const number = logicalChapterNumber(value);
+    if (number !== null && number > 0) expected.add(number);
+  }
+  for (const value of seenNumbers || []) {
+    const number = logicalChapterNumber(value);
+    if (number !== null && number > 0) seen.add(number);
+  }
+  if (expected.size === 0) return [];
+  const min = Math.min(...expected);
+  const max = Math.max(...expected);
+  const gaps = [];
+  for (let number = min; number <= max; number += 1) {
+    if (expected.has(number) && !seen.has(number)) gaps.push(number);
+  }
+  return gaps;
+}
+
 module.exports = {
   normalizeChapterRange,
   logicalChapterNumber,
   inChapterRange,
   filterByChapterRange,
+  findChapterGaps,
 };

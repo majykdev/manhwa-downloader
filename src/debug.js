@@ -35,6 +35,10 @@ function debugPdfDownloaded(jobId, title, filename) {
   debugLog("info", `Job ${jobId} PDF downloaded by user: ${title} → ${filename}`);
 }
 
+function debugCbzDownloaded(jobId, title, filename) {
+  debugLog("info", `Job ${jobId} CBZ downloaded by user: ${title} → ${filename}`);
+}
+
 function debugScrapeComplete(jobId, title, pages, chapters) {
   debugLog(
     "info",
@@ -48,5 +52,6 @@ module.exports = {
   getDebugLog,
   debugChapterDownloaded,
   debugPdfDownloaded,
+  debugCbzDownloaded,
   debugScrapeComplete,
 };

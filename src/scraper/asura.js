@@ -72,7 +72,7 @@ async function discoverRange(slug, startChapter, onLog = () => {}, endChapter = 
     );
   }
 
-  return { title, coverUrl, firstChapter, lastChapter };
+  return { title, coverUrl, firstChapter, lastChapter, chapterNumbers: info.chapterNumbers || [] };
 }
 
 async function walkNext(slug, start, onLog) {

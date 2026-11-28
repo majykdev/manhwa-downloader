@@ -1,7 +1,7 @@
 {
   "name": "manhwa-downloader",
-  "version": "1.0.1-beta.3",
-  "description": "Server-side manga/manhwa scraper that renders a series into a single PDF.",
+  "version": "1.0.2",
+  "description": "Server-side manga/manhwa scraper that renders a series into PDF or CBZ files.",
   "type": "commonjs",
   "main": "src/server.js",
   "scripts": {
@@ -13,6 +13,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "axios": "^1.21.1",
     "cheerio": "^1.0.0",
     "express": "^5.3.0",
@@ -21,5 +22,8 @@
     "sharp": "^0.35.5",
     "wreq-js": "^3.2.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "yauzl": "^3.4.0"
+  }
 }

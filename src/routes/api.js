@@ -3,24 +3,32 @@
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
+const sharp = require("sharp");
+const config = require("../config");
 const { parseInputUrl } = require("../scraper/parse");
 const { normalizeCoverUrl } = require("../scraper/cover");
 const generic = require("../scraper/generic");
 const asura = require("../scraper/asura");
 const atsu = require("../scraper/atsu");
 const { discoveryStore } = require("../jobs/discoveryStore");
-const { runJob, buildPdf } = require("../jobs/runner");
-const { normalizeChapterRange, inChapterRange } = require("../chapterRange");
+const { runJob, buildPdf, buildCbz, selectedFormats } = require("../jobs/runner");
+const {
+  normalizeChapterRange,
+  logicalChapterNumber,
+  inChapterRange,
+} = require("../chapterRange");
 const { normalizeSpeedSettings } = require("../jobs/speedController");
 const { normalizeProfile } = require("../jobs/globalThrottle");
 const {
   debugLog,
   getDebugLog,
   debugPdfDownloaded,
+  debugCbzDownloaded,
   subscribe: subscribeDebug,
 } = require("../debug");
 const { sanitizeFilename } = require("../util");
-const { clearJobTempFiles } = require("../jobs/store");
+const { clearJobTempFiles, artifactPath } = require("../jobs/store");
+const { persistence } = require("../jobs/persistence");
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -36,6 +44,23 @@ function normalizeBoolean(value, fallback) {
   return fallback;
 }
 
+const EXPORT_FORMATS = ["pdf", "cbz", "both"];
+const IMAGE_RESOLUTION_STEPS = [1, 1.25, 1.5, 1.75, 2];
+
+function normalizeExportFormat(value) {
+  const format = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return EXPORT_FORMATS.includes(format) ? format : "pdf";
+}
+
+function normalizeImageResolutionScale(value) {
+  const scale = typeof value === "string" ? Number(value.trim()) : Number(value);
+  if (!Number.isFinite(scale)) return 1;
+  return IMAGE_RESOLUTION_STEPS.reduce(
+    (best, step) => (Math.abs(step - scale) < Math.abs(best - scale) ? step : best),
+    1,
+  );
+}
+
 function requestOptions(body) {
   return {
     range: normalizeChapterRange(body),
@@ -43,6 +68,8 @@ function requestOptions(body) {
       ...normalizeSpeedSettings(body.settings || {}),
       globalThrottleProfile: normalizeProfile(body.settings?.globalThrottleProfile),
       chapterHyperlinks: normalizeBoolean(body.settings?.chapterHyperlinks, true),
+      exportFormat: normalizeExportFormat(body.settings?.exportFormat),
+      imageResolutionScale: normalizeImageResolutionScale(body.settings?.imageResolutionScale),
     },
   };
 }
@@ -69,6 +96,42 @@ function normalizeHttpUrl(value, label) {
   } catch {
     return null;
   }
+}
+
+function normalizeChapterKeys(value) {
+  if (value == null) return null;
+  if (!Array.isArray(value)) throw new Error("Chapter keys must be a list.");
+  const keys = new Set();
+  for (const entry of value) {
+    const number = logicalChapterNumber(entry);
+    if (number !== null && number > 0) keys.add(number);
+  }
+  return keys.size > 0 ? [...keys].sort((a, b) => a - b) : null;
+}
+
+function filterJobSpec(spec, keys) {
+  if (!keys) return spec;
+  const wanted = new Set(keys);
+  const chapterUrls = {};
+  const chapterMeta = {};
+  const chapterParts = {};
+  for (const [index, url] of Object.entries(spec.chapterUrls || {})) {
+    const number = logicalChapterNumber(spec.chapterMeta?.[index]?.number ?? index);
+    if (number === null || !wanted.has(number)) continue;
+    chapterUrls[number] = url;
+    if (spec.chapterMeta?.[index]) chapterMeta[number] = spec.chapterMeta[index];
+    if (spec.chapterParts?.[index]) chapterParts[number] = spec.chapterParts[index];
+  }
+  return { ...spec, chapterUrls, chapterMeta, chapterParts };
+}
+
+function parseCoverDataUrl(value) {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^data:image\/(?:jpe?g|png|webp);base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!match) return null;
+  const buffer = Buffer.from(match[1].replace(/\s/g, ""), "base64");
+  if (buffer.length === 0 || buffer.length > config.COVER_UPLOAD_MAX_BYTES) return null;
+  return buffer;
 }
 
 function chapterPreviewLabel(number) {
@@ -171,6 +234,23 @@ function publicPreviewGroup(group) {
   return preview;
 }
 
+function discoveryChapterNumbers(discovery, chapters) {
+  const numbers = new Set();
+  for (const group of chapters) {
+    const number = logicalChapterNumber(group.number);
+    if (number !== null) numbers.add(number);
+    for (const part of group.parts || []) {
+      const partNumber = logicalChapterNumber(part.number);
+      if (partNumber !== null) numbers.add(partNumber);
+    }
+  }
+  for (const number of discovery.raw?.chapterNumbers || []) {
+    const normalized = logicalChapterNumber(number);
+    if (normalized !== null) numbers.add(normalized);
+  }
+  return [...numbers].sort((a, b) => a - b);
+}
+
 function publicDiscovery(discovery, token) {
   const chapters = (discovery.chapters || [])
     .filter((group) => includePreviewGroup(group, discovery.requestedRange || {}))
@@ -185,12 +265,13 @@ function publicDiscovery(discovery, token) {
     medium: discovery.medium || null,
     providers: (discovery.providers || []).map((provider) => ({ ...provider })),
     chapters,
-      defaults: {
-        sourceOrder: (discovery.providers || []).map((provider) => provider.id),
-        enabledSourceIds: (discovery.providers || []).map((provider) => provider.id),
-        chapterOverrides: {},
-        excludedPartKeys: [],
-      },
+    chapterNumbers: discoveryChapterNumbers(discovery, chapters),
+    defaults: {
+      sourceOrder: (discovery.providers || []).map((provider) => provider.id),
+      enabledSourceIds: (discovery.providers || []).map((provider) => provider.id),
+      chapterOverrides: {},
+      excludedPartKeys: [],
+    },
     log: discovery.log || [],
   };
 }
@@ -352,6 +433,28 @@ function createApiRouter(store) {
   const router = express.Router();
 
   router.post(
+    "/covers",
+    asyncHandler(async (req, res) => {
+      const buffer = parseCoverDataUrl(req.body?.dataUrl);
+      if (!buffer) {
+        return res.status(400).json({ error: "Invalid or oversized cover image." });
+      }
+      let prepared;
+      try {
+        prepared = await sharp(buffer)
+          .rotate()
+          .resize({ width: 1600, withoutEnlargement: true })
+          .jpeg({ quality: 90 })
+          .toBuffer();
+      } catch {
+        return res.status(400).json({ error: "Cover image could not be read." });
+      }
+      const coverToken = persistence.saveCoverUpload(prepared);
+      res.status(201).json({ coverToken });
+    }),
+  );
+
+  router.post(
     "/discover",
     asyncHandler(async (req, res) => {
       const { url, firstChapterUrl } = req.body || {};
@@ -448,12 +551,31 @@ function createApiRouter(store) {
       const hasExplicitRange =
         body.startChapter !== undefined && body.startChapter !== null && body.startChapter !== "" ||
         body.endChapter !== undefined && body.endChapter !== null && body.endChapter !== "";
-      const effectiveRange = hasExplicitRange ? range : storedDiscovery?.requestedRange || range;
+      let effectiveRange = hasExplicitRange ? range : storedDiscovery?.requestedRange || range;
+      let includeChapterKeys;
+      try {
+        includeChapterKeys = normalizeChapterKeys(body.includeChapterKeys);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+      const wantedKeys = includeChapterKeys ? new Set(includeChapterKeys) : null;
+      if (wantedKeys && !storedDiscovery && !hasExplicitRange) {
+        effectiveRange = {
+          startChapter: Math.min(...includeChapterKeys),
+          endChapter: Math.max(...includeChapterKeys),
+        };
+      }
       const customCoverUrl = body.coverUrl
         ? normalizeCoverUrl(normalizeHttpUrl(body.coverUrl, "Cover"))
         : null;
       if (body.coverUrl && !customCoverUrl) {
         return res.status(400).json({ error: "Cover image URL must be http(s)." });
+      }
+      const uploadedCoverPath = body.coverToken
+        ? persistence.getCoverPath(body.coverToken)
+        : null;
+      if (body.coverToken && !uploadedCoverPath) {
+        debugLog("warn", "Saved cover upload is no longer available; using detected cover instead.");
       }
       let edits;
       let excludedPartKeys;
@@ -480,7 +602,8 @@ function createApiRouter(store) {
         } else {
           spec = buildPreviewJobSpec(discovery, edits, effectiveRange);
         }
-        if (spec.chapterUrls.length === 0) {
+        spec = filterJobSpec(spec, includeChapterKeys);
+        if (Object.keys(spec.chapterUrls || {}).length === 0) {
           return res.status(400).json({ error: "No chapters matched that range." });
         }
         job = store.create({
@@ -489,7 +612,9 @@ function createApiRouter(store) {
           slug: discovery.kind === "asura" ? discovery.slug : discovery.mangaId,
           medium: discovery.medium,
           title: discovery.title,
-          coverUrl: customCoverUrl || spec.coverUrl || discovery.coverUrl || null,
+          coverUrl: uploadedCoverPath ? null : customCoverUrl || spec.coverUrl || discovery.coverUrl || null,
+          uploadedCoverPath,
+          seriesKey: body.seriesKey || null,
           chapterUrls: spec.chapterUrls,
           chapterMeta: spec.chapterMeta,
           chapterParts: spec.chapterParts || {},
@@ -527,9 +652,12 @@ function createApiRouter(store) {
               log: discoveryLog,
             });
           }
-          const chapters = (disc.chapters || []).filter((chapter) =>
-            inChapterRange(chapter.num, effectiveRange),
-          );
+          const chapters = (disc.chapters || []).filter((chapter) => {
+            if (!inChapterRange(chapter.num, effectiveRange)) return false;
+            if (!wantedKeys) return true;
+            const number = logicalChapterNumber(chapter.num);
+            return number !== null && wantedKeys.has(number);
+          });
           if (chapters.length === 0) {
             return res.status(400).json({ error: "No chapters matched that range." });
           }
@@ -537,7 +665,9 @@ function createApiRouter(store) {
             url: parsed.sourceUrl,
             kind: "generic",
             title: disc.title,
-            coverUrl: customCoverUrl || disc.coverUrl || null,
+            coverUrl: uploadedCoverPath ? null : customCoverUrl || disc.coverUrl || null,
+            uploadedCoverPath,
+            seriesKey: body.seriesKey || null,
             chapterUrls: chapters.map((c) => c.url),
             chapterMeta: chapters.map((c) => ({
               number: Number.isFinite(c.num) ? c.num : undefined,
@@ -568,8 +698,9 @@ function createApiRouter(store) {
             });
           }
           discovery.log = discoveryLog;
-          const spec = atsu.buildJobSpec(discovery, { ...effectiveRange });
-          if (spec.chapterUrls.length === 0) {
+          let spec = atsu.buildJobSpec(discovery, { ...effectiveRange });
+          spec = filterJobSpec(spec, includeChapterKeys);
+          if (Object.keys(spec.chapterUrls || {}).length === 0) {
             return res.status(400).json({ error: "No chapters matched that range." });
           }
           job = store.create({
@@ -578,7 +709,9 @@ function createApiRouter(store) {
             slug: discovery.mangaId,
             medium: discovery.medium,
             title: discovery.title,
-            coverUrl: customCoverUrl || spec.coverUrl || discovery.coverUrl || null,
+            coverUrl: uploadedCoverPath ? null : customCoverUrl || spec.coverUrl || discovery.coverUrl || null,
+            uploadedCoverPath,
+            seriesKey: body.seriesKey || null,
             chapterUrls: spec.chapterUrls,
             chapterMeta: spec.chapterMeta,
             chapterParts: spec.chapterParts,
@@ -594,7 +727,9 @@ function createApiRouter(store) {
             kind: "asura",
             slug: parsed.slug,
             firstChapter: parsed.chapter ?? null,
-            coverUrl: customCoverUrl || null,
+            coverUrl: uploadedCoverPath ? null : customCoverUrl || null,
+            uploadedCoverPath,
+            seriesKey: body.seriesKey || null,
             settings,
             startChapter: effectiveRange.startChapter,
             endChapter: effectiveRange.endChapter,
@@ -608,15 +743,42 @@ function createApiRouter(store) {
   );
 
   router.post(
+    "/jobs/:id/continue",
+    asyncHandler(async (req, res) => {
+      const job = store.get(req.params.id);
+      if (!job) return res.status(404).json({ error: "Job not found." });
+      if (!job.resumable) return res.status(409).json({ error: "Job has no saved progress." });
+      if (job.status === "running") return res.status(409).json({ error: "Job is already running." });
+      const pending = Object.entries(job.chapters || {})
+        .filter(
+          ([, data]) =>
+            data.status !== "done" && !/locked\/premium/.test(data.reason || ""),
+        )
+        .map(([key]) => Number(key));
+      if (pending.length === 0) {
+        return res.status(409).json({ error: "There is no remaining work to resume." });
+      }
+      job.userPaused = false;
+      job.downloadPaused = false;
+      job.error = null;
+      store.markQueued(job);
+      store.pushLog(job, `Resuming ${pending.length} unfinished chapter(s)…`);
+      setImmediate(() => runJob(store, job, { continueJob: true }));
+      res.status(202).json({ jobId: job.id });
+    }),
+  );
+
+  router.post(
     "/jobs/:id/retry",
     asyncHandler(async (req, res) => {
       const job = store.get(req.params.id);
       if (!job) return res.status(404).json({ error: "Job not found." });
-      if (job.status !== "complete") {
+      if (job.status !== "complete" && job.status !== "failed") {
         return res.status(409).json({ error: "Job has not finished yet." });
       }
       if (job.tempCleaned) {
         job.tempCleaned = false;
+        job.resumable = false;
         job.hasPrologue = false;
         job.pages = 0;
         job.currentPage = 0;
@@ -628,17 +790,32 @@ function createApiRouter(store) {
           data.pagesTotal = 0;
           data.reason = null;
         }
-        store.pushLog(job, "Rebuilding PDF from source after temp cleanup…");
+        store.markQueued(job);
+        const formats = selectedFormats(job);
+        store.pushLog(
+          job,
+          `Rebuilding ${formats.map((format) => format.toUpperCase()).join(" + ")} from source after temp cleanup…`,
+        );
         setImmediate(() => runJob(store, job));
         res.status(202).json({ jobId: job.id });
         return;
       }
-      const retryable = store.findRetryable(job);
-      if (retryable.length === 0) {
-        return res.status(409).json({ error: "No chapters to retry." });
+      let requestedKeys;
+      try {
+        requestedKeys = normalizeChapterKeys(req.body?.chapterKeys);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
       }
+      const retryable = store.findRetryable(job, requestedKeys);
+      if (retryable.length === 0) {
+        return res
+          .status(409)
+          .json({ error: "No retryable chapters. Use resume for unfinished work." });
+      }
+      job.resumable = false;
+      store.markQueued(job);
       store.pushLog(job, `Retrying ${retryable.length} chapter(s)…`);
-      setImmediate(() => runJob(store, job, { retry: true }));
+      setImmediate(() => runJob(store, job, { retry: true, retryKeys: retryable }));
       res.status(202).json({ jobId: job.id });
     }),
   );
@@ -729,28 +906,45 @@ function createApiRouter(store) {
     asyncHandler(async (req, res) => {
       const job = store.get(req.params.id);
       if (!job) return res.status(404).json({ error: "Job not found." });
+      const requested = typeof req.query?.format === "string" ? req.query.format.trim().toLowerCase() : "";
+      const format = requested === "cbz" ? "cbz" : "pdf";
+      const ext = format === "cbz" ? "cbz" : "pdf";
       const baseName = sanitizeFilename(job.title || job.slug || "comic");
+      const title = job.title || job.slug || "comic";
 
-      if (job.status === "complete" && job.pdfPath && fs.existsSync(job.pdfPath)) {
-        const filename = `${baseName}.pdf`;
-        debugPdfDownloaded(job.id, job.title || job.slug || "comic", filename);
-        return res.download(job.pdfPath, filename, (err) => {
+      const finalPath = artifactPath(job, format);
+      if (job.status === "complete" && finalPath && fs.existsSync(finalPath)) {
+        const filename = `${baseName}.${ext}`;
+        if (format === "cbz") debugCbzDownloaded(job.id, title, filename);
+        else debugPdfDownloaded(job.id, title, filename);
+        return res.download(finalPath, filename, (err) => {
           if (!err) clearJobTempFiles(job);
         });
       }
 
       const snap = store.snapshot(job.id);
       if (snap.completedChapters > 0 && job.tmpDir) {
-        const partialPath = path.join(job.tmpDir, `partial-${Date.now()}.pdf`);
+        const partialPath = path.join(job.tmpDir, `partial-${Date.now()}-${format}.${ext}`);
         (job.partialPaths ||= []).push(partialPath);
         store.setDownloadPause(job, true);
         try {
-          await buildPdf(store, job, partialPath, { partial: true, doneOnly: true });
+          if (format === "cbz") {
+            await buildCbz(store, job, partialPath, { partial: true, doneOnly: true });
+          } else {
+            await buildPdf(store, job, partialPath, { partial: true, doneOnly: true });
+          }
+        } catch (err) {
+          job.partialPaths = (job.partialPaths || []).filter((p) => p !== partialPath);
+          try {
+            fs.rmSync(partialPath, { force: true });
+          } catch {}
+          throw err;
         } finally {
           store.setDownloadPause(job, false);
         }
-        const filename = `${baseName}-partial.pdf`;
-        debugPdfDownloaded(job.id, job.title || job.slug || "comic", filename);
+        const filename = `${baseName}-partial.${ext}`;
+        if (format === "cbz") debugCbzDownloaded(job.id, title, filename);
+        else debugPdfDownloaded(job.id, title, filename);
         return res.download(partialPath, filename, (err) => {
           if (err) return;
           job.partialPaths = (job.partialPaths || []).filter((p) => p !== partialPath);
@@ -760,7 +954,7 @@ function createApiRouter(store) {
         });
       }
 
-      res.status(409).json({ error: "PDF is not ready yet." });
+      return res.status(409).json({ error: `${format.toUpperCase()} is not ready yet.` });
     }),
   );
 
@@ -769,11 +963,16 @@ function createApiRouter(store) {
 
 module.exports = {
   createApiRouter,
+  normalizeExportFormat,
+  normalizeImageResolutionScale,
   publicDiscovery,
   makeAsuraPreview,
   makeGenericPreview,
   normalizeChapterEdits,
+  normalizeChapterKeys,
   normalizeExcludedPartKeys,
+  filterJobSpec,
+  discoveryChapterNumbers,
   buildPreviewJobSpec,
   applyEditsToAtsuSpec,
 };

@@ -8,9 +8,14 @@ const {
   makeAsuraPreview,
   makeGenericPreview,
   normalizeChapterEdits,
+  normalizeChapterKeys,
   normalizeExcludedPartKeys,
+  filterJobSpec,
+  discoveryChapterNumbers,
   buildPreviewJobSpec,
   applyEditsToAtsuSpec,
+  normalizeExportFormat,
+  normalizeImageResolutionScale,
 } = require("../src/routes/api");
 
 test("publicDiscovery exposes a common chapter list with cover and keys", () => {
@@ -157,4 +162,57 @@ test("applyEditsToAtsuSpec replaces whole chapters, parts, and added chapters", 
   assert.strictEqual(spec.chapterParts[1][1], "https://other.example/chapter/2-5");
   assert.strictEqual(spec.prologueUrl, "https://other.example/chapter/0");
   assert.strictEqual(spec.chapterUrls[2], "https://example.com/chapter/9");
+});
+
+test("publicDiscovery exposes discovered chapter numbers for gap checks", () => {
+  const discovery = {
+    kind: "asura",
+    title: "Example",
+    requestedRange: { startChapter: null, endChapter: null },
+    providers: [],
+    log: [],
+    raw: { chapterNumbers: [0, 1, 2, 3] },
+    chapters: [
+      { key: "0", number: 0, label: "Prologue", url: "https://example.com/chapter/0", options: [] },
+      { key: "1", number: 1, label: "Chapter 1", url: "https://example.com/chapter/1", options: [] },
+    ],
+  };
+  assert.deepStrictEqual(publicDiscovery(discovery, "token").chapterNumbers, [0, 1, 2, 3]);
+  assert.deepStrictEqual(discoveryChapterNumbers(discovery, []), [0, 1, 2, 3]);
+});
+
+test("normalizeChapterKeys and filterJobSpec keep only requested logical chapters", () => {
+  assert.deepStrictEqual(normalizeChapterKeys([1, "2", 2.9, "bad", 0]), [1, 2]);
+  assert.throws(() => normalizeChapterKeys("1"), /list/);
+
+  const spec = {
+    chapterUrls: {
+      1: "https://example.com/chapter/1",
+      2: "https://example.com/chapter/2",
+      3: "https://example.com/chapter/3",
+    },
+    chapterMeta: {
+      1: { number: 1 },
+      2: { number: 2 },
+      3: { number: 3 },
+    },
+    chapterParts: {},
+  };
+  assert.deepStrictEqual(Object.keys(filterJobSpec(spec, [2]).chapterUrls), ["2"]);
+});
+
+test("export format settings normalize to PDF, CBZ, or both", () => {
+  assert.strictEqual(normalizeExportFormat("PDF"), "pdf");
+  assert.strictEqual(normalizeExportFormat(" cbz "), "cbz");
+  assert.strictEqual(normalizeExportFormat("Both"), "both");
+  assert.strictEqual(normalizeExportFormat("epub"), "pdf");
+  assert.strictEqual(normalizeExportFormat(null), "pdf");
+});
+
+test("image resolution settings normalize to fixed steps", () => {
+  assert.strictEqual(normalizeImageResolutionScale("1"), 1);
+  assert.strictEqual(normalizeImageResolutionScale(1.3), 1.25);
+  assert.strictEqual(normalizeImageResolutionScale("1.9"), 2);
+  assert.strictEqual(normalizeImageResolutionScale(5), 2);
+  assert.strictEqual(normalizeImageResolutionScale("bad"), 1);
 });

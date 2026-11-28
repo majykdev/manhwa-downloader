@@ -1,10 +1,10 @@
 # Manhwa Downloader
 
-Current release: **v1.0.1 beta 3** (`1.0.1-beta.3`).
+Current release: **v1.0.2** (`1.0.2`).
 
-A deployable web app that turns a manga/manhwa series into a single PDF. Asura
-Scans uses a fast numeric path, atsu.moe uses its public JSON API with selectable
-scanlation sources, and other sites use a generic scraper.
+A deployable web app that turns a manga/manhwa series into a PDF, CBZ, or both.
+Asura Scans uses a fast numeric path, atsu.moe uses its public JSON API with
+selectable scanlation sources, and other sites use a generic scraper.
 
 Paste a series or chapter URL (for example
 `https://asurascans.com/comics/trash-of-the-counts-family-7e1f454a/chapter/0` or
@@ -14,8 +14,8 @@ replaced with a URL from another supported site. Additional chapters can be
 added manually.
 
 Everything is fetched server-side: the browser only talks to your app and
-downloads the finished PDF, so source-site images do not cross the user's
-connection and there are no browser CORS issues.
+downloads the finished PDF or CBZ, so source-site images do not cross the
+user's connection and there are no browser CORS issues.
 
 ## Requirements
 
@@ -214,6 +214,29 @@ New jobs and refreshed sessions start from defaults; applied values stay with th
 </details>
 
 <details>
+<summary>Export format</summary>
+
+**Export format** chooses `PDF`, `CBZ`, or `Both`; PDF is the default. Both
+download links appear when both formats were built.
+</details>
+
+<details>
+<summary>Image resolution</summary>
+
+**Image resolution** ranges from `1× (current)` to `2×` in `0.25` steps. Images
+are downscaled toward that target width but never artificially upscaled, and
+settings affect new jobs and retries only.
+</details>
+
+<details>
+<summary>Source quality</summary>
+
+Original JPEG/PNG bytes are kept when no conversion is needed. When conversion
+is required, prepared JPEGs use higher quality and PNG transparency is
+preserved; covers and uploaded covers follow the same resolution setting.
+</details>
+
+<details>
 <summary>Hyperlinks toggle</summary>
 
 **Chapter Hyperlinks** is enabled by default; turning it off keeps PDF table-of-contents labels but removes clickable links.
@@ -251,7 +274,7 @@ Multiple jobs can be created with the `+` button and run in parallel; job rows s
 <details>
 <summary>Refresh persistence</summary>
 
-Active jobs and editable drafts persist across browser refreshes through `sessionStorage`, and background jobs continue running.
+Active jobs and editable drafts persist across browser refreshes through `sessionStorage`, and background jobs continue running. Job checkpoints are also stored on disk so interrupted jobs can be resumed after a server restart.
 </details>
 
 <details>
@@ -269,7 +292,7 @@ The `×` action pauses a running job before archiving it, or archives a finished
 <details>
 <summary>Auto archive</summary>
 
-Downloading the final PDF from a job also archives it.
+Downloading the final PDF or CBZ from a job also archives it.
 </details>
 
 <details>
@@ -305,24 +328,76 @@ The debug log shows server errors and chapter failures, streamed over Server-Sen
 </details>
 
 <details>
-<summary><strong>Covers and PDF output</strong></summary>
+<summary><strong>Series updates and recovery</strong></summary>
+
+<details>
+<summary>One-click updates</summary>
+
+**Update series** discovers the current chapter list and immediately exports only
+chapters that are not in this browser's saved series history. Archive rows show
+an **Update** action only when a cached discovery check finds a new or
+undownloaded chapter; checks are limited to three concurrent requests and cached
+for up to ten minutes.
+</details>
+
+<details>
+<summary>Missing chapter checker</summary>
+
+Completed exports show a missing-chapter warning only when saved series history
+still has gaps. The warning is not shown in the chapter-review composer, and
+archive rows no longer offer a **Fill** action; use **Update** to export missing
+chapters.
+</details>
+
+<details>
+<summary>Resume after restart</summary>
+
+Job metadata and per-chapter checkpoints are saved under `~/.manhwa-downloader`.
+Interrupted jobs offer **Resume from last completed chapter** after an app or
+server restart.
+</details>
+
+<details>
+<summary>Retry selection</summary>
+
+Failed chapter retries now include load, captcha, and no-page failures except
+locked/premium chapters. The retry dialog shows each reason and lets you pick
+individual chapters before retrying.
+</details>
+
+</details>
+
+<details>
+<summary><strong>Covers and exported files</strong></summary>
 
 <details>
 <summary>Custom covers</summary>
 
-A user-supplied cover URL always wins over auto-detection.
+A user-supplied cover URL always wins over auto-detection. JPG, PNG, and WebP
+images up to 5 MB can also be uploaded locally; the uploaded cover wins over a
+custom URL and auto-detection.
 </details>
 
 <details>
 <summary>Detected covers</summary>
 
-Detected covers come from Asura/Atsu selectors or generic metadata; a found cover is rendered as PDF page 1, while a missing or failed cover falls back to a PDF without it.
+Detected covers come from Asura/Atsu selectors or generic metadata; a found cover is used as the first PDF page or the CBZ cover, while a missing or failed cover falls back to output without it.
 </details>
 
 <details>
-<summary>Streaming PDF</summary>
+<summary>Streaming output</summary>
 
-The PDF is written with `pdfkit` directly to disk, keeping only prepared images in memory so large books do not exhaust the process.
+The PDF is written with `pdfkit` directly to disk, keeping only prepared images
+in memory so large books do not exhaust the process. The CBZ is written with
+`archiver` and includes the prepared image files in chapter order.
+</details>
+
+<details>
+<summary>CBZ contents</summary>
+
+CBZ files contain `cover.<ext>` plus chapter folders such as `Prologue/000.<ext>`
+and `Chapter 001/000.<ext>`. CBZ exports do not include generated title pages,
+table-of-contents pages, or chapter spacer pages.
 </details>
 
 <details>
@@ -334,19 +409,19 @@ Each chapter is preceded by a centered two-line spacer page, such as `Chapter 37
 <details>
 <summary>Page sizing</summary>
 
-PDF pages use phone-friendly dimensions by default, with `natural` or `first` chapter page-size modes and configurable JPEG quality.
+PDF pages use phone-friendly dimensions by default, with `natural` or `first` chapter page-size modes and configurable JPEG quality. The image-resolution setting scales page width up to the configured maximum without upscaling source images.
 </details>
 
 <details>
-<summary>Partial PDF</summary>
+<summary>Partial exports</summary>
 
-While a job is running, `/api/jobs/:id/download` builds a partial PDF from completed chapters and pauses scraping until the response finishes. The final download is the complete PDF.
+While a job is running, `/api/jobs/:id/download?format=pdf|cbz` builds a partial PDF or CBZ from completed chapters and pauses scraping until the response finishes. The final download is the complete selected file.
 </details>
 
 <details>
 <summary>TTL cleanup</summary>
 
-Finished jobs, PDFs, and temporary images are deleted after `JOB_TTL_MS` (default one hour).
+Finished jobs, PDF/CBZ files, and temporary images are deleted after `JOB_TTL_MS` (default one hour).
 </details>
 
 </details>
@@ -391,21 +466,24 @@ docker build -t manhwa-downloader .
 docker run -p 3001:3001 manhwa-downloader
 ```
 
-The app is single-instance by design because jobs live in memory. Use one web
-process; move `JobStore` to a shared store before scaling horizontally.
+The app is single-instance by design: jobs run in memory, while checkpoints are
+saved on disk for restart recovery. Use one web process; move `JobStore` to a
+shared store before scaling horizontally.
 
 ## API
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/discover` | Body `{ "url": "...", "startChapter": 37, "endChapter": null, "settings": { ... } }` → detected kind, short-lived `discoveryToken`, chapter preview, cover URL, and Atsu provider options. |
-| `POST` | `/api/scrape` | Body `{ "discoveryToken": "...", "chapterUrlOverrides": {}, "addedChapters": [{ "number": 58, "url": "..." }], "coverUrl": "...", "sourceOrder": [], "enabledSourceIds": [], "chapterOverrides": {}, "settings": { ... } }` → `{ "jobId" }`. Also accepts the legacy direct-url body. Responds `422 NEED_FIRST_CHAPTER` when no chapter list is found and `400` when no chapter matches the range. |
-| `POST` | `/api/jobs/:id/retry` | Re-scrapes chapters that failed only at image download and rebuilds the PDF. |
+| `POST` | `/api/discover` | Body `{ "url": "...", "startChapter": 37, "endChapter": null, "settings": { ... } }` → detected kind, short-lived `discoveryToken`, chapter preview, chapter numbers, cover URL, and Atsu provider options. |
+| `POST` | `/api/covers` | Body `{ "dataUrl": "data:image/jpeg;base64,..." }` → `{ "coverToken" }` for a locally uploaded cover image. |
+| `POST` | `/api/scrape` | Body `{ "discoveryToken": "...", "chapterUrlOverrides": {}, "addedChapters": [{ "number": 58, "url": "..." }], "coverUrl": "...", "coverToken": "...", "includeChapterKeys": [58, 59], "seriesKey": "asura:example", "sourceOrder": [], "enabledSourceIds": [], "chapterOverrides": {}, "settings": { ... } }` → `{ "jobId" }`. Also accepts the legacy direct-url body. `includeChapterKeys` exports only those logical chapters. Responds `422 NEED_FIRST_CHAPTER` when no chapter list is found and `400` when no chapter matches the range. |
+| `POST` | `/api/jobs/:id/continue` | Resumes a saved job from its last completed chapters, including jobs interrupted by a restart. |
+| `POST` | `/api/jobs/:id/retry` | Re-scrapes selected retryable chapters (all skipped failures except locked/premium) and rebuilds the selected PDF/CBZ outputs using the current job settings. Body `{ "chapterKeys": [3, 7] }` is optional. |
 | `POST` | `/api/jobs/:id/pause` | Pauses a running job and returns a paused snapshot. |
 | `POST` | `/api/jobs/:id/resume` | Resumes a paused job. |
-| `GET` | `/api/jobs/:id` | Job snapshot: phase, status, chapter progress, completed count, pages, skips, log, speed/throttle state, and download URL. |
+| `GET` | `/api/jobs/:id` | Job snapshot: phase, status, chapter progress, completed count, pages, skips, log, speed/throttle state, settings, and PDF/CBZ download URLs. |
 | `GET` | `/api/jobs/:id/events` | SSE stream of job snapshots. |
-| `GET` | `/api/jobs/:id/download` | Streams the complete PDF; while running, builds a partial PDF from chapters already done. |
+| `GET` | `/api/jobs/:id/download` | Streams the complete PDF by default; `?format=cbz` streams CBZ and `?format=pdf` streams PDF. While running, builds the selected partial file from chapters already done. |
 | `GET` | `/api/debug/log` | Recent structured debug entries for the UI debug window. |
 | `GET` | `/api/debug/events` | SSE stream of new debug entries. |
 | `GET` | `/health` | Health check for platform probes and `deploy.command`. |
@@ -422,9 +500,13 @@ or deployment platform's environment. Key knobs:
 - `PDF_MAX_PAGE_WIDTH` (390) — PDF page width in points; phone-friendly by default, with height following the image aspect ratio.
 - `PDF_CHAPTER_PAGE_SIZE_MODE` (`natural`) — `natural` keeps each image's aspect ratio; `first` normalizes every page in a chapter to the first image page's size.
 - `PDF_JPEG_QUALITY` (85) — JPEG quality for embedded page images, from 0 to 100.
-- `JOB_TTL_MS` (3600000) — how long finished jobs, PDFs, and temporary files are kept before deletion.
+- `PREPARED_JPEG_QUALITY` (95) — JPEG quality when a source image must be converted while preserving resolution; original JPEG/PNG bytes are reused when no conversion is needed.
+- `JOB_TTL_MS` (3600000) — how long finished jobs, PDF/CBZ files, and temporary files are kept before deletion.
 - `JS_RENDER_ENABLED` (true), `JS_RENDER_TIMEOUT_MS` (30000), `JS_RENDER_SCROLLS` (10) — Playwright fallback for JS-driven pages.
 - `TLS_IMPERSONATION_ENABLED` (true), `CAPTCHA_GRACE_MS` (8000) — TLS/HTTP2 impersonation fallback and captcha detection grace period.
+- `MANHWA_DOWNLOADER_DATA_DIR` (`~/.manhwa-downloader`) — directory for saved job checkpoints and uploaded cover images.
+- `COVER_UPLOAD_MAX_BYTES` (5242880) — maximum decoded size of an uploaded cover image.
+- `API_JSON_LIMIT` (`8mb`) — maximum JSON request body size, allowing base64 cover uploads.
 
 ## Notes
 

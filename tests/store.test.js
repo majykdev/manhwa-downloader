@@ -56,6 +56,57 @@ test("clearJobTempFiles removes temp images but keeps the final PDF", (t) => {
   assert.strictEqual(job.tempCleaned, true);
 });
 
+test("clearJobTempFiles removes temp images but keeps final PDF and CBZ", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asura-dl-dual-test-"));
+  const pdfPath = path.join(dir, "book.pdf");
+  const cbzPath = path.join(dir, "book.cbz");
+  fs.writeFileSync(path.join(dir, "001.img"), "image");
+  fs.writeFileSync(pdfPath, "pdf");
+  fs.writeFileSync(cbzPath, "cbz");
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const store = new JobStore();
+  const job = store.create({ tmpDir: dir, pdfPath, cbzPath });
+  clearJobTempFiles(job);
+
+  assert.strictEqual(fs.existsSync(pdfPath), true);
+  assert.strictEqual(fs.existsSync(cbzPath), true);
+  assert.strictEqual(fs.existsSync(path.join(dir, "001.img")), false);
+  assert.strictEqual(job.tempCleaned, true);
+});
+
+test("snapshot exposes PDF and CBZ download URLs for completed exports", (t) => {
+  const store = new JobStore();
+  const job = store.create({
+    status: "complete",
+    pdfPath: "/tmp/book.pdf",
+    cbzPath: "/tmp/book.cbz",
+  });
+  t.after(() => clearInterval(store._ticker));
+
+  const snap = store.snapshot(job.id);
+  assert.deepStrictEqual(snap.downloads, {
+    pdf: `/api/jobs/${job.id}/download?format=pdf`,
+    cbz: `/api/jobs/${job.id}/download?format=cbz`,
+  });
+  assert.strictEqual(snap.downloadUrl, `/api/jobs/${job.id}/download`);
+  assert.strictEqual(snap.partialDownload, false);
+});
+
+test("resumable snapshots require unfinished chapters", (t) => {
+  const store = new JobStore();
+  t.after(() => clearInterval(store._ticker));
+  const empty = store.create({ status: "failed", resumable: true });
+  const pending = store.create({
+    status: "failed",
+    resumable: true,
+    chapters: { 1: { status: "done" }, 2: { status: "skipped", reason: "download failed" } },
+  });
+
+  assert.strictEqual(store.snapshot(empty.id).resumable, false);
+  assert.strictEqual(store.snapshot(pending.id).resumable, true);
+});
+
 test("create normalizes initial log strings and exposes speed snapshots", () => {
   const store = new JobStore();
   const speed = { concurrency: 4, delayMs: 400, auto: true };
@@ -95,7 +146,7 @@ test("sweep deletes artifacts and the entry of an expired finished job", (t) => 
   assert.strictEqual(fs.existsSync(pdfPath), false);
 });
 
-test("sweep deletes artifacts when a stale running job is marked failed", (t) => {
+test("sweep keeps artifacts when a stale running job is marked resumable", (t) => {
   const { dir, pdfPath } = makeArtifacts();
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -111,7 +162,8 @@ test("sweep deletes artifacts when a stale running job is marked failed", (t) =>
 
   const failed = store.get(job.id);
   assert.strictEqual(failed.status, "failed");
-  assert.match(failed.error, /Timed out/);
-  assert.strictEqual(fs.existsSync(dir), false);
-  assert.strictEqual(fs.existsSync(pdfPath), false);
+  assert.match(failed.error, /resume available/);
+  assert.strictEqual(failed.resumable, true);
+  assert.strictEqual(fs.existsSync(dir), true);
+  assert.strictEqual(fs.existsSync(pdfPath), true);
 });

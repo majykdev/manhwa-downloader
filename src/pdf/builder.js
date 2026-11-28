@@ -64,10 +64,14 @@ class PdfBuilder {
   }
 
   pageSizeFromDimensions(meta) {
-    const width = this.maxPageWidth;
+    const rawPageWidth = Number(meta?.pageWidth);
+    const width =
+      Number.isFinite(rawPageWidth) && rawPageWidth > 0
+        ? Math.round(rawPageWidth)
+        : this.maxPageWidth;
     const height = Math.max(
       1,
-      Math.round(width * ((meta.height || 1) / (meta.width || 1))),
+      Math.round(width * ((meta?.height || 1) / (meta?.width || 1))),
     );
     return [width, height];
   }
@@ -135,18 +139,37 @@ class PdfBuilder {
     const meta = await image.metadata();
     const width = Number(dimensions.width) || meta.width || this.maxPageWidth;
     const height = Number(dimensions.height) || meta.height || 1;
-    const jpeg = await image
-      .clone()
-      .resize({ width: Math.min(width, this.maxPageWidth * 2) })
-      .jpeg({ quality: this.jpegQuality })
-      .toBuffer();
+    const actualFormat = String(meta.format || "").toLowerCase();
+    const declaredFormat = String(dimensions.format || actualFormat).toLowerCase();
+    const formatMatches =
+      declaredFormat === actualFormat ||
+      (declaredFormat === "jpg" && actualFormat === "jpeg") ||
+      (declaredFormat === "jpeg" && actualFormat === "jpg");
+    const sizeMatches =
+      (!dimensions.width || Number(dimensions.width) === meta.width) &&
+      (!dimensions.height || Number(dimensions.height) === meta.height);
+    const preparedBytes =
+      ["jpeg", "png"].includes(actualFormat) && formatMatches && sizeMatches;
+    const embedBuffer = preparedBytes
+      ? buffer
+      : await image
+          .clone()
+          .resize({ width: Math.min(width, this.maxPageWidth * 2) })
+          .jpeg({ quality: this.jpegQuality })
+          .toBuffer();
+    const embedMeta = {
+      ...dimensions,
+      width,
+      height,
+      format: preparedBytes ? actualFormat : "jpeg",
+    };
 
     if (options.contained) {
       const [pageW, pageH] = printerPageSize([width, height]);
       const fit = containSize(width, height, Math.round(pageW * 0.8), Math.round(pageH * 0.55));
       this.doc.addPage({ size: [pageW, pageH] });
       this.doc.rect(0, 0, pageW, pageH).fill("#ffffff");
-      this.doc.image(jpeg, (pageW - fit.w) / 2, (pageH - fit.h) / 2, {
+      this.doc.image(embedBuffer, (pageW - fit.w) / 2, (pageH - fit.h) / 2, {
         width: fit.w,
         height: fit.h,
       });
@@ -157,7 +180,7 @@ class PdfBuilder {
       return 0;
     }
 
-    const index = await this.addPreparedImage(jpeg, { width, height });
+    const index = await this.addPreparedImage(embedBuffer, embedMeta);
     const kids = this.doc._root.data.Pages.data.Kids;
     const [page] = kids.splice(index, 1);
     kids.unshift(page);

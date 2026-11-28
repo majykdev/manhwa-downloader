@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Manhwa Downloader v1.0.1 beta 3</title>
+  <title>Manhwa Downloader v1.0.2</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <style>
     :root {
@@ -160,6 +160,10 @@
     .download {
       margin-top: 20px;
       text-align: center;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
     }
     .download a {
       display: inline-flex;
@@ -362,6 +366,73 @@
       color: var(--muted);
     }
     .cover-apply-status.applied { color: var(--ok); }
+    .cover-upload-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .cover-upload-btn {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 7px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .cover-upload-btn input { display: none; }
+    .cover-upload-status { font-size: 11px; color: var(--muted); }
+    .cover-upload-status.applied { color: var(--ok); }
+    .cover-preview {
+      width: 72px;
+      height: 96px;
+      object-fit: cover;
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .detail-gaps {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+      font-size: 12px;
+      color: var(--warn);
+    }
+    .detail-gaps button {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 11px;
+      padding: 5px 9px;
+    }
+    .modal.wide { width: min(460px, 100%); }
+    .retry-list {
+      max-height: 280px;
+      overflow-y: auto;
+      margin-bottom: 16px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: #100e15;
+    }
+    .retry-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .retry-row:last-child { border-bottom: none; }
+    .retry-row input { margin-top: 2px; accent-color: var(--accent); }
+    .retry-row span { min-width: 0; overflow-wrap: anywhere; }
+    .retry-row small { display: block; color: var(--muted); font-size: 11px; }
     .settings-btn {
       position: absolute;
       top: 22px;
@@ -457,6 +528,14 @@
       margin-bottom: 10px;
     }
     .settings-row > span { font-size: 12px; color: var(--text); }
+    .resolution-control {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 190px;
+    }
+    .resolution-control input[type="range"] { width: 130px; accent-color: var(--accent); }
+    .resolution-value { min-width: 64px; text-align: right; font-size: 12px; color: var(--accent-2); }
     .toggle {
       position: relative;
       width: 38px;
@@ -793,6 +872,11 @@
       color: var(--ok);
     }
     .archive-row-status.paused { color: var(--warn); }
+    .archive-row-hint {
+      flex-shrink: 0;
+      font-size: 10px;
+      color: var(--muted);
+    }
     .archive-row-actions {
       display: flex;
       align-items: center;
@@ -1038,7 +1122,7 @@
 <body>
   <div class="layout">
     <div class="card">
-      <h1>Manhwa Downloader <span class="version-badge">v1.0.1 beta 3</span></h1>
+      <h1>Manhwa Downloader <span class="version-badge">v1.0.2</span></h1>
     <button type="button" class="settings-btn" id="settings-btn" aria-label="Settings" aria-expanded="false" aria-controls="settings-menu">
       <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"></circle>
@@ -1063,6 +1147,27 @@
 
       <div class="settings-section">
         <span class="settings-label">Output</span>
+        <div class="settings-row">
+          <span>Export format</span>
+          <div class="custom-select" data-select="exportFormat">
+            <button type="button" class="select-trigger" id="exportFormat-trigger" aria-haspopup="listbox" aria-expanded="false">
+              <span id="exportFormat-value">PDF</span><span class="select-chevron"></span>
+            </button>
+            <div class="select-options hidden" id="exportFormat-options" role="listbox">
+              <button type="button" class="select-option" role="option" data-value="pdf" aria-selected="true">PDF<small>Single printable PDF with contents and chapter dividers</small></button>
+              <button type="button" class="select-option" role="option" data-value="cbz" aria-selected="false">CBZ<small>Comic archive with cover and chapter folders</small></button>
+              <button type="button" class="select-option" role="option" data-value="both" aria-selected="false">Both<small>Download PDF and CBZ</small></button>
+            </div>
+          </div>
+        </div>
+        <div class="settings-row">
+          <span>Image resolution</span>
+          <div class="resolution-control">
+            <input id="image-resolution" type="range" min="1" max="2" step="0.25" value="1" aria-label="Image resolution" />
+            <span class="resolution-value" id="image-resolution-value">1× (current)</span>
+          </div>
+        </div>
+        <div class="settings-hint">Higher values use more of the source image when available. Low-resolution images are never upscaled.</div>
         <div class="settings-row">
           <span>Chapter Hyperlinks</span>
           <button type="button" class="toggle" id="chapter-hyperlinks" role="switch" aria-checked="true" aria-label="Chapter Hyperlinks"></button>
@@ -1206,6 +1311,14 @@
           <button type="button" id="cover-apply-btn">Apply</button>
         </div>
         <span id="cover-apply-status" class="cover-apply-status" aria-live="polite"></span>
+        <div class="cover-upload-row">
+          <label class="cover-upload-btn" for="cover-file">
+            Upload cover image
+            <input id="cover-file" type="file" accept="image/jpeg,image/png,image/webp" />
+          </label>
+          <span id="cover-upload-status" class="cover-upload-status" aria-live="polite"></span>
+        </div>
+        <img id="cover-preview" class="cover-preview hidden" alt="Selected cover preview" />
       </div>
       <div class="source-actions">
         <button type="button" id="sources-start">Start export</button>
@@ -1221,15 +1334,23 @@
       </div>
       <div class="bar"><div class="bar-fill" id="bar-fill"></div></div>
       <div class="stats" id="stats"></div>
+      <div class="detail-gaps hidden" id="detail-gaps">
+        <span id="detail-gaps-text"></span>
+        <button type="button" id="detail-gaps-btn">Fill missing chapters</button>
+      </div>
       <div class="chapter-list hidden" id="chapter-list"></div>
       <div class="log" id="log"></div>
     </div>
 
     <div class="download hidden" id="download">
       <a id="download-link" href="#">Download PDF</a>
+      <a id="download-cbz-link" class="hidden" href="#">Download CBZ</a>
     </div>
     <div class="job-actions hidden" id="job-actions">
       <button type="button" id="pause-btn">Pause export</button>
+    </div>
+    <div class="retry hidden" id="resume">
+      <button type="button" id="resume-btn">Resume from last completed chapter</button>
     </div>
     <div class="retry hidden" id="retry">
       <button type="button" id="retry-btn">Retry failed chapters</button>
@@ -1250,6 +1371,18 @@
         <div class="modal-actions">
           <button type="button" class="secondary" id="settings-modal-cancel">Cancel</button>
           <button type="button" id="settings-modal-confirm">Use anyway</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="retry-modal" role="dialog" aria-modal="true" aria-labelledby="retry-modal-title">
+      <div class="modal wide">
+        <h2 id="retry-modal-title">Retry failed chapters</h2>
+        <p>Select the chapters to fetch again. Other chapters stay as they are.</p>
+        <div class="retry-list" id="retry-list"></div>
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="retry-cancel">Cancel</button>
+          <button type="button" id="retry-selected">Retry selected</button>
         </div>
       </div>
     </div>

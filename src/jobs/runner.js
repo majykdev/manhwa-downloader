@@ -1,7 +1,6 @@
 "use strict";
 
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const sharp = require("sharp");
 const config = require("../config");
@@ -10,6 +9,7 @@ const atsu = require("../scraper/atsu");
 const generic = require("../scraper/generic");
 const { parseInputUrl } = require("../scraper/parse");
 const { PdfBuilder } = require("../pdf/builder");
+const { CbzBuilder, chapterFolder } = require("../cbz/builder");
 const {
   SpeedController,
   DynamicLimiter,
@@ -21,18 +21,20 @@ const {
   debugChapterDownloaded,
   debugScrapeComplete,
 } = require("../debug");
-const { removeJobArtifacts } = require("./store");
 const { mapLimit, sanitizeFilename, chapterDisplayLabel } = require("../util");
 
-const BASE_TMP = fs.mkdtempSync(path.join(os.tmpdir(), "asura-dl-"));
+const BASE_TMP = path.join(config.DATA_DIR, "jobs");
+fs.mkdirSync(BASE_TMP, { recursive: true });
 
-async function runJob(store, job, { retry = false } = {}) {
+async function runJob(store, job, { retry = false, retryKeys = null, continueJob = false } = {}) {
   job.status = "running";
   job.error = null;
   job.finishedAt = null;
   const dir = job.tmpDir || fs.mkdtempSync(path.join(BASE_TMP, `${job.id}-`));
   job.tmpDir = dir;
+  const formats = selectedFormats(job);
   let pdfPath = null;
+  let cbzPath = null;
   const speed = new SpeedController(job.settings || {});
   job.speed = speed.snapshot();
   const limiter = new DynamicLimiter(speed.concurrency());
@@ -53,20 +55,31 @@ async function runJob(store, job, { retry = false } = {}) {
   try {
     await store.waitForResume(job);
 
-    if (!retry) {
+    if (!retry && !continueJob) {
       store.setPhase(job, "discovering");
       if (
         job.kind === "generic" ||
         job.kind === "atsu" ||
-        (job.kind === "asura" && Array.isArray(job.chapterUrls) && job.chapterUrls.length > 0)
+        (job.kind === "asura" && job.chapterUrls && Object.keys(job.chapterUrls).length > 0)
       ) {
-        job.totalChapters = (job.chapterUrls || []).length;
-        for (let i = 0; i < job.totalChapters; i++) {
-          const meta = (job.chapterMeta || [])[i] || {};
-            store.setChapter(job, i, {
-              status: "pending",
-              label: chapterDisplayLabel(meta.label ?? meta.number ?? chapterLabel(job, i)),
-              detail: meta.detail || null,
+        const specKeys = Object.keys(job.chapterUrls || {})
+          .map(Number)
+          .sort((a, b) => a - b);
+        job.totalChapters = specKeys.length;
+        const numbers = specKeys
+          .map((key) => Number(job.chapterMeta?.[key]?.number))
+          .filter(Number.isFinite);
+        if (numbers.length > 0) {
+          job.firstChapter = Math.min(...numbers);
+          job.lastChapter = Math.max(...numbers);
+        }
+        for (const key of specKeys) {
+          const meta = (job.chapterMeta || {})[key] || {};
+          store.setChapter(job, key, {
+            status: "pending",
+            number: Number.isFinite(Number(meta.number)) ? Number(meta.number) : key,
+            label: chapterDisplayLabel(meta.label ?? meta.number ?? chapterLabel(job, key)),
+            detail: meta.detail || null,
             parts: meta.parts || null,
             provider: meta.provider || null,
           });
@@ -90,7 +103,11 @@ async function runJob(store, job, { retry = false } = {}) {
         job.lastChapter = info.lastChapter;
         job.totalChapters = info.lastChapter - info.firstChapter + 1;
         for (let ch = info.firstChapter; ch <= info.lastChapter; ch++) {
-          store.setChapter(job, ch, { status: "pending", label: chapterDisplayLabel(ch) });
+          store.setChapter(job, ch, {
+            status: "pending",
+            number: ch,
+            label: chapterDisplayLabel(ch),
+          });
         }
         store.pushLog(
           job,
@@ -99,19 +116,32 @@ async function runJob(store, job, { retry = false } = {}) {
       }
     }
 
-    pdfPath = path.join(dir, `${sanitizeFilename(job.title || job.slug || "comic")}.pdf`);
+    const baseName = sanitizeFilename(job.title || job.slug || "comic");
+    pdfPath = formats.includes("pdf") ? path.join(dir, `${baseName}.pdf`) : null;
+    cbzPath = formats.includes("cbz") ? path.join(dir, `${baseName}.cbz`) : null;
     job.pdfPath = pdfPath;
+    job.cbzPath = cbzPath;
 
     await prepareCover(store, job, dir, handleFailure);
     await store.waitForResume(job);
 
     store.setPhase(job, "scraping");
-    await fetchPrologue(store, job, dir, handleFailure);
+    if (job.hasPrologue && (!retry || job.chapters[0]?.status !== "done")) {
+      await fetchPrologue(store, job, dir, handleFailure);
+    }
     await store.waitForResume(job);
 
+    if (retry || continueJob) {
+      job.totalChapters = regularChapterKeys(job).length;
+    }
     const todo = retry
-      ? store.findRetryable(job).filter((key) => !isPrologue(job, key))
-      : regularChapterKeys(job);
+      ? store.findRetryable(job, retryKeys).filter((key) => !isPrologue(job, key))
+      : continueJob
+        ? regularChapterKeys(job).filter((key) => {
+            const data = job.chapters[key] || {};
+            return data.status !== "done" && !/locked\/premium/.test(data.reason || "");
+          })
+        : regularChapterKeys(job);
     await Promise.all(
       todo.map((key) =>
         limiter.run(async () => {
@@ -123,13 +153,19 @@ async function runJob(store, job, { retry = false } = {}) {
 
     store.setPhase(job, "assembling");
     await store.waitForResume(job);
-    await buildPdf(store, job, pdfPath);
+    if (cbzPath) await buildCbz(store, job, cbzPath);
+    if (pdfPath) await buildPdf(store, job, pdfPath);
+    const built = [];
+    if (pdfPath) built.push("PDF");
+    if (cbzPath) built.push("CBZ");
     recount(job);
     store.setPhase(job, "done");
-    store.finish(job, "complete", { pdfPath });
+    store.finish(job, "complete", { pdfPath, cbzPath, resumable: false });
+    const builtNote =
+      built.length === 1 && built[0] === "PDF" ? "" : ` (${built.join(" + ")})`;
     store.pushLog(
       job,
-      `Done — ${job.pages} pages across ${job.totalChapters} chapters.`,
+      `Done — ${job.pages} pages across ${job.totalChapters} chapters.${builtNote}`,
     );
     debugScrapeComplete(
       job.id,
@@ -139,10 +175,9 @@ async function runJob(store, job, { retry = false } = {}) {
     );
   } catch (err) {
     debugLog("error", `Job ${job.id} fatal: ${err.stack || err.message}`);
-    store.pushLog(job, `Fatal: ${err.message}`);
-    removeJobArtifacts(job);
+    store.pushLog(job, `Fatal: ${err.message} — resume is available.`);
     store.setPhase(job, "failed");
-    store.finish(job, "failed", { error: err.message });
+    store.finish(job, "failed", { error: err.message, resumable: true });
   } finally {
     globalThrottle.clearJobDelay(job.id);
   }
@@ -199,7 +234,7 @@ async function processChapter(store, job, key, speed, handleFailure) {
   store.setChapter(job, key, { pagesTotal: images.length });
   try {
     const prepared = await downloadImages(store, job, key, images, label);
-    await saveChapter(job.tmpDir, key, prepared);
+    await saveChapter(job.tmpDir, key, prepared, job.settings);
     store.setChapter(job, key, { status: "done", pagesDone: prepared.length });
     job.pages += prepared.length;
     store.pushLog(job, `${label}: ${prepared.length} pages`);
@@ -293,6 +328,62 @@ async function buildPdf(store, job, pdfPath, { partial = false, doneOnly = false
   return { pages: totalPages, contents };
 }
 
+async function buildCbz(store, job, cbzPath, { partial = false, doneOnly = false } = {}) {
+  const builder = new CbzBuilder(cbzPath);
+  let keys = regularChapterKeys(job);
+  if (doneOnly) {
+    keys = keys.filter(
+      (key) =>
+        job.chapters[key]?.status === "done" && chapterFiles(job.tmpDir, key).length > 0,
+    );
+  }
+
+  const coverPath = path.join(job.tmpDir, "cover.img");
+  const coverFile = fs.existsSync(coverPath)
+    ? coverPath
+    : job.coverPath && fs.existsSync(job.coverPath)
+      ? job.coverPath
+      : null;
+  if (coverFile) {
+    let dimensions = job.coverDimensions || {};
+    try {
+      dimensions = JSON.parse(fs.readFileSync(path.join(job.tmpDir, "cover.meta.json"), "utf8"));
+    } catch {}
+    await builder.addCover(fs.readFileSync(coverFile), dimensions);
+  }
+
+  const chapters = [];
+  const addChapter = async (key, folder) => {
+    const files = chapterFiles(job.tmpDir, key);
+    if (files.length === 0) return;
+    const info = { ...chapterInfo(job.tmpDir, key), files };
+    const added = await builder.addChapter(folder, info);
+    if (added > 0) chapters.push(folder);
+  };
+
+  const prologueDone = job.chapters[0]?.status === "done";
+  if (
+    chapterFiles(job.tmpDir, 0).length > 0 &&
+    (!doneOnly || prologueDone)
+  ) {
+    await addChapter(0, "Prologue");
+  }
+
+  for (const key of keys) {
+    const data = job.chapters[key] || {};
+    await addChapter(key, chapterFolder(key, data.number));
+  }
+
+  await builder.finish();
+
+  const totalPages = builder.entries.length;
+  if (!partial) {
+    job.currentPage = totalPages;
+    job.pages = totalPages;
+  }
+  return { pages: totalPages, chapters };
+}
+
 function fetchChapterByUrl(url) {
   let kind = "generic";
   try {
@@ -333,6 +424,7 @@ async function fetchCombinedChapter(urls) {
 }
 
 async function downloadImages(store, job, key, images, label) {
+  const scale = job.settings?.imageResolutionScale;
   return mapLimit(images, config.IMAGE_PARALLELISM, async (url) => {
     await store.waitForResume(job);
     let buffer;
@@ -359,11 +451,12 @@ async function downloadImages(store, job, key, images, label) {
       }
     }
     await store.waitForResume(job);
-    return prepareImage(buffer);
+    return prepareImage(buffer, scale);
   });
 }
 
 async function prepareCover(store, job, dir, handleFailure) {
+  const scale = job.settings?.imageResolutionScale;
   const coverPath = path.join(dir, "cover.img");
   const metaPath = path.join(dir, "cover.meta.json");
   if (fs.existsSync(coverPath)) {
@@ -374,6 +467,20 @@ async function prepareCover(store, job, dir, handleFailure) {
       job.coverDimensions = null;
     }
     return;
+  }
+  if (job.uploadedCoverPath && fs.existsSync(job.uploadedCoverPath)) {
+    try {
+      const prepared = await prepareImage(fs.readFileSync(job.uploadedCoverPath), scale);
+      const dimensions = preparedMeta(prepared);
+      fs.writeFileSync(coverPath, prepared.buffer);
+      fs.writeFileSync(metaPath, JSON.stringify(dimensions));
+      job.coverPath = coverPath;
+      job.coverDimensions = dimensions;
+      store.pushLog(job, "Cover: added from upload.");
+      return;
+    } catch (err) {
+      store.pushLog(job, `Cover: upload failed (${err.message}) — continuing without cover.`);
+    }
   }
   if (!job.coverUrl) return;
 
@@ -399,8 +506,8 @@ async function prepareCover(store, job, dir, handleFailure) {
   }
 
   try {
-    const prepared = await prepareImage(buffer);
-    const dimensions = { width: prepared.width, height: prepared.height };
+    const prepared = await prepareImage(buffer, scale);
+    const dimensions = preparedMeta(prepared);
     fs.writeFileSync(coverPath, prepared.buffer);
     fs.writeFileSync(metaPath, JSON.stringify(dimensions));
     job.coverPath = coverPath;
@@ -411,18 +518,55 @@ async function prepareCover(store, job, dir, handleFailure) {
   }
 }
 
-async function prepareImage(buffer) {
+function preparedMeta(prepared) {
+  return {
+    width: prepared.width,
+    height: prepared.height,
+    pageWidth: prepared.pageWidth,
+    format: prepared.format,
+  };
+}
+
+async function prepareImage(buffer, scale = 1) {
   const image = sharp(buffer);
   const meta = await image.metadata();
-  const width = Math.max(1, meta.width || config.PDF_MAX_PAGE_WIDTH);
-  const height = Math.max(1, meta.height || 1);
-  const targetWidth = Math.min(width, config.PDF_MAX_PAGE_WIDTH * 2);
-  const jpeg = await image
-    .clone()
-    .resize({ width: targetWidth })
-    .jpeg({ quality: config.PDF_JPEG_QUALITY })
-    .toBuffer();
-  return { buffer: jpeg, width, height };
+  const naturalWidth = Math.max(1, meta.width || config.PDF_MAX_PAGE_WIDTH);
+  const naturalHeight = Math.max(1, meta.height || 1);
+  const baseCap = config.PDF_MAX_PAGE_WIDTH * 2;
+  const requested = Number(scale);
+  const effectiveScale = Math.max(
+    1,
+    Math.min(Number.isFinite(requested) ? requested : 1, naturalWidth / baseCap),
+  );
+  const targetWidth = Math.max(1, Math.round(Math.min(naturalWidth, baseCap * effectiveScale)));
+  const pageWidth = Math.max(1, Math.round(config.PDF_MAX_PAGE_WIDTH * effectiveScale));
+  const sourceFormat = String(meta.format || "").toLowerCase();
+  const sourceFormatName = sourceFormat === "jpg" ? "jpeg" : sourceFormat;
+  const keepOriginal =
+    (sourceFormatName === "jpeg" || sourceFormatName === "png") && targetWidth >= naturalWidth;
+  if (keepOriginal) {
+    return {
+      buffer,
+      width: naturalWidth,
+      height: naturalHeight,
+      pageWidth,
+      format: sourceFormatName,
+    };
+  }
+
+  const height = Math.max(1, Math.round((naturalHeight * targetWidth) / naturalWidth));
+  const preservePng = sourceFormatName === "png";
+  const resized = image.clone().resize({ width: targetWidth, withoutEnlargement: true });
+  const output = preservePng
+    ? await resized.png().toBuffer()
+    : await resized.jpeg({ quality: config.PREPARED_JPEG_QUALITY || 95 }).toBuffer();
+  return {
+    buffer: output,
+    width: targetWidth,
+    height,
+    pageWidth,
+    format: preservePng ? "png" : "jpeg",
+  };
 }
 
 async function fetchPrologue(store, job, dir, handleFailure) {
@@ -458,7 +602,7 @@ async function fetchPrologue(store, job, dir, handleFailure) {
   const images = chap.images.slice(0, config.MAX_IMAGES_PER_CHAPTER);
   try {
     const prepared = await downloadImages(store, job, 0, images, "Prologue");
-    await saveChapter(dir, 0, prepared);
+    await saveChapter(dir, 0, prepared, job.settings);
     job.hasPrologue = true;
     store.setChapter(job, 0, {
       status: "done",
@@ -507,6 +651,15 @@ function regularChapterKeys(job) {
   return chapterKeys(job).filter((key) => !isPrologue(job, key));
 }
 
+function selectedFormats(job) {
+  const value = job.settings?.exportFormat;
+  const format = typeof value === "string" ? value.trim().toLowerCase() : "pdf";
+  const normalized = ["pdf", "cbz", "both"].includes(format) ? format : "pdf";
+  if (normalized === "both") return ["pdf", "cbz"];
+  if (normalized === "cbz" || (!job.pdfPath && job.cbzPath)) return ["cbz"];
+  return ["pdf"];
+}
+
 function recount(job) {
   const chapters = regularChapterKeys(job)
     .map((key) => job.chapters[key])
@@ -515,14 +668,24 @@ function recount(job) {
   job.locked = chapters.filter((d) => /locked\/premium/.test(d.reason || "")).length;
 }
 
-async function saveChapter(dir, key, images) {
+async function saveChapter(dir, key, images, settings) {
   const chapDir = path.join(dir, `chap-${key}`);
   fs.rmSync(chapDir, { recursive: true, force: true });
   fs.mkdirSync(chapDir, { recursive: true });
   const dimensions = [];
   const writes = images.map((image, i) => {
     const file = `${String(i).padStart(3, "0")}.img`;
-    dimensions.push({ file, width: image.width, height: image.height });
+    const entry = {
+      file,
+      width: image.width,
+      height: image.height,
+      pageWidth: image.pageWidth,
+      format: image.format,
+    };
+    const rawScale = typeof settings === "number" ? settings : settings?.imageResolutionScale;
+    const scale = Number(rawScale);
+    if (Number.isFinite(scale) && scale > 0) entry.scale = scale;
+    dimensions.push(entry);
     return Promise.resolve().then(() => fs.writeFileSync(path.join(chapDir, file), image.buffer));
   });
   await Promise.all(writes);
@@ -538,11 +701,16 @@ function chapterInfo(dir, key) {
   }
   try {
     const saved = JSON.parse(fs.readFileSync(metaPath, "utf8"));
-    const ordered = files.map((file) => ({
-      file: path.basename(file),
-      width: saved.find((entry) => entry.file === path.basename(file))?.width,
-      height: saved.find((entry) => entry.file === path.basename(file))?.height,
-    }));
+    const ordered = files.map((file) => {
+      const entry = saved.find((item) => item.file === path.basename(file)) || {};
+      return {
+        file: path.basename(file),
+        width: entry.width,
+        height: entry.height,
+        pageWidth: entry.pageWidth,
+        format: entry.format,
+      };
+    });
     return { files, dimensions: ordered, prepared: true };
   } catch {
     return { files, dimensions: files.map(() => ({})), prepared: false };
@@ -559,4 +727,14 @@ function chapterFiles(dir, key) {
     .map((f) => path.join(chapDir, f));
 }
 
-module.exports = { runJob, buildPdf };
+module.exports = {
+  runJob,
+  buildPdf,
+  buildCbz,
+  prepareImage,
+  saveChapter,
+  chapterInfo,
+  chapterFiles,
+  regularChapterKeys,
+  selectedFormats,
+};

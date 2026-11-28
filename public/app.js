@@ -13,6 +13,9 @@ const logBox = document.getElementById("log");
 const chapterListBox = document.getElementById("chapter-list");
 const downloadBox = document.getElementById("download");
 const downloadLink = document.getElementById("download-link");
+const downloadCbzLink = document.getElementById("download-cbz-link");
+const imageResolutionInput = document.getElementById("image-resolution");
+const imageResolutionValue = document.getElementById("image-resolution-value");
 const jobActionsBox = document.getElementById("job-actions");
 const pauseBtn = document.getElementById("pause-btn");
 const detailTitle = document.getElementById("detail-title");
@@ -58,6 +61,18 @@ const addChapterBtn = document.getElementById("add-chapter-btn");
 const reviewCoverUrlInput = document.getElementById("review-cover-url");
 const coverApplyBtn = document.getElementById("cover-apply-btn");
 const coverApplyStatus = document.getElementById("cover-apply-status");
+const coverFileInput = document.getElementById("cover-file");
+const coverUploadStatus = document.getElementById("cover-upload-status");
+const coverPreview = document.getElementById("cover-preview");
+const resumeBox = document.getElementById("resume");
+const resumeBtn = document.getElementById("resume-btn");
+const detailGapsBox = document.getElementById("detail-gaps");
+const detailGapsText = document.getElementById("detail-gaps-text");
+const detailGapsBtn = document.getElementById("detail-gaps-btn");
+const retryModal = document.getElementById("retry-modal");
+const retryListBox = document.getElementById("retry-list");
+const retryCancelBtn = document.getElementById("retry-cancel");
+const retrySelectedBtn = document.getElementById("retry-selected");
 
 const settingsBtn = document.getElementById("settings-btn");
 const settingsMenu = document.getElementById("settings-menu");
@@ -73,8 +88,13 @@ const settingsModalCancel = document.getElementById("settings-modal-cancel");
 const JOBS_KEY = "manhwa-downloader-jobs";
 const DRAFTS_KEY = "manhwa-downloader-drafts";
 const ARCHIVE_KEY = "manhwa-downloader-archive";
+const SERIES_KEY = "manhwa-downloader-series";
 const ARCHIVE_TTL_MS = 60 * 60 * 1000;
+const ARCHIVE_DISCOVERY_TTL_MS = 10 * 60 * 1000;
+const ARCHIVE_DISCOVERY_MAX = 3;
 const ARCHIVE_LIMIT = 100;
+const SERIES_LIMIT = 100;
+const COVER_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
 const ACTIVE_JOB_KEY = "manhwa-downloader-active-job";
 const DEFAULT_SETTINGS = {
   startChapter: "",
@@ -83,6 +103,8 @@ const DEFAULT_SETTINGS = {
   delay: "auto",
   globalThrottleProfile: "balanced",
   chapterHyperlinks: true,
+  exportFormat: "pdf",
+  imageResolutionScale: 1,
 };
 
 let settings = { ...DEFAULT_SETTINGS };
@@ -105,8 +127,13 @@ let discoveryGeneration = 0;
 let archiveRerun = null;
 let activeArchiveId = null;
 let pendingArchiveDeleteId = null;
+let currentDetailGapKeys = [];
+let lastArchiveRenderCount = null;
+let archiveDiscoveryActive = 0;
 const jobs = new Map();
 const chapterRows = new Map();
+const archiveDiscoveryCache = new Map();
+const archiveDiscoveryQueue = [];
 
 function show(el) { el.classList.remove("hidden"); }
 function hide(el) { el.classList.add("hidden"); }
@@ -140,7 +167,23 @@ function normalizedSettings(value) {
   if (!["safe", "balanced", "fast"].includes(merged.globalThrottleProfile)) {
     merged.globalThrottleProfile = "balanced";
   }
+  if (!["pdf", "cbz", "both"].includes(merged.exportFormat)) merged.exportFormat = "pdf";
+  const scale = Number(merged.imageResolutionScale);
+  if (!Number.isFinite(scale)) {
+    merged.imageResolutionScale = 1;
+  } else {
+    merged.imageResolutionScale = [1, 1.25, 1.5, 1.75, 2].reduce((best, step) =>
+      Math.abs(step - scale) < Math.abs(best - scale) ? step : best,
+    );
+  }
   return merged;
+}
+
+function updateSettings(value) {
+  const normalized = normalizedSettings(value);
+  normalized.startChapter = null;
+  normalized.endChapter = null;
+  return normalized;
 }
 
 function resetSettingsApplied() {
@@ -159,18 +202,29 @@ function renderSettings() {
   startChapterInput.value = draftSettings.startChapter ?? "";
   endChapterInput.value = draftSettings.endChapter ?? "";
   chapterHyperlinksToggle.setAttribute("aria-checked", String(draftSettings.chapterHyperlinks !== false));
-  for (const key of ["concurrency", "delay", "globalThrottleProfile"]) {
-    const value = String(draftSettings[key] ?? "auto");
+  const scale = normalizedSettings(draftSettings).imageResolutionScale;
+  if (imageResolutionInput) imageResolutionInput.value = String(scale);
+  if (imageResolutionValue) {
+    imageResolutionValue.textContent = scale === 1 ? "1× (current)" : `${scale}×`;
+  }
+  for (const key of ["exportFormat", "concurrency", "delay", "globalThrottleProfile"]) {
+    const value = String(draftSettings[key] ?? (key === "exportFormat" ? "pdf" : "auto"));
     const label = document.getElementById(`${key}-value`);
     if (label) {
       label.textContent =
-        key === "globalThrottleProfile"
-          ? value.charAt(0).toUpperCase() + value.slice(1)
-          : value === "auto"
-            ? "Auto"
-            : key === "delay"
-              ? `${value}ms`
-              : value;
+        key === "exportFormat"
+          ? value === "pdf"
+            ? "PDF"
+            : value === "cbz"
+              ? "CBZ"
+              : "Both"
+          : key === "globalThrottleProfile"
+            ? value.charAt(0).toUpperCase() + value.slice(1)
+            : value === "auto"
+              ? "Auto"
+              : key === "delay"
+                ? `${value}ms`
+                : value;
     }
     for (const option of document.querySelectorAll(`[data-select="${key}"] .select-option`)) {
       option.setAttribute("aria-selected", String(option.dataset.value === value));
@@ -310,11 +364,19 @@ endChapterInput.addEventListener("input", () => applySetting("endChapter", endCh
 chapterHyperlinksToggle.addEventListener("click", () => {
   applySetting("chapterHyperlinks", chapterHyperlinksToggle.getAttribute("aria-checked") !== "true");
 });
+imageResolutionInput?.addEventListener("input", () => {
+  applySetting("imageResolutionScale", Number(imageResolutionInput.value));
+});
+setupCustomSelect("exportFormat");
 setupCustomSelect("concurrency");
 setupCustomSelect("delay");
 setupCustomSelect("globalThrottleProfile");
 
 document.addEventListener("click", (event) => {
+  if (!retryModal.classList.contains("hidden")) {
+    if (event.target === retryModal) closeRetryModal();
+    return;
+  }
   const modalOpen = !settingsModal.classList.contains("hidden");
   const clickedSettings = settingsMenu.contains(event.target);
   const clickedSelect = Boolean(event.target.closest(".custom-select"));
@@ -344,6 +406,10 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (!retryModal.classList.contains("hidden")) {
+    closeRetryModal();
+    return;
+  }
   if (!archiveDeleteModal.classList.contains("hidden")) {
     closeArchiveDeleteModal();
     return;
@@ -388,6 +454,198 @@ function isValidHttpUrl(value) {
   }
 }
 
+function logicalChapterNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return Math.floor(number);
+}
+
+function uniqueChapterNumbers(values) {
+  const seen = new Set();
+  for (const value of values || []) {
+    const number = logicalChapterNumber(value);
+    if (number !== null) seen.add(number);
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+
+function seriesKeyFromUrl(value) {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (host.includes("asurascans.com")) {
+      const index = parts.findIndex((part) => part.toLowerCase() === "comics");
+      if (index >= 0 && parts[index + 1]) return `asura:${parts[index + 1]}`;
+    }
+    if (host.includes("atsu.moe")) {
+      const index = parts.findIndex((part) => ["manga", "novel"].includes(part.toLowerCase()));
+      if (index >= 0 && parts[index + 1]) return `atsu:${parts[index + 1]}`;
+    }
+    return `${host}:${parts.slice(0, 2).join("/") || "/"}`;
+  } catch {
+    return String(value).trim();
+  }
+}
+
+function loadSeriesHistory() {
+  let data = [];
+  try {
+    data = JSON.parse(localStorage.getItem(SERIES_KEY) || "[]");
+  } catch {}
+  if (!Array.isArray(data)) return [];
+  return data.filter((record) => record && record.key);
+}
+
+function persistSeriesHistory(records) {
+  try {
+    localStorage.setItem(SERIES_KEY, JSON.stringify(records.slice(0, SERIES_LIMIT)));
+  } catch {}
+}
+
+function getSeriesRecord(key) {
+  if (!key) return null;
+  return loadSeriesHistory().find((record) => record.key === key) || null;
+}
+
+function upsertSeriesRecord(record) {
+  if (!record?.key) return null;
+  const records = loadSeriesHistory();
+  const index = records.findIndex((entry) => entry.key === record.key);
+  if (index >= 0) records[index] = { ...records[index], ...record };
+  else records.unshift(record);
+  persistSeriesHistory(records);
+  return record;
+}
+
+function collectArchiveDownloadedKeys(key) {
+  const numbers = [];
+  for (const record of loadArchive()) {
+    const recordKey = record.detail?.seriesKey || seriesKeyFromUrl(record.url);
+    if (recordKey !== key) continue;
+    for (const chapter of record.detail?.chapters || []) {
+      if (chapter.status !== "done") continue;
+      numbers.push(chapter.number ?? chapter.chapter);
+    }
+  }
+  return uniqueChapterNumbers(numbers);
+}
+
+function seriesGapsFor(key, expected) {
+  const record = getSeriesRecord(key);
+  const expectedNumbers = uniqueChapterNumbers(
+    expected?.length ? expected : record?.expectedChapterKeys,
+  );
+  if (expectedNumbers.length === 0) return [];
+  const downloaded = new Set([
+    ...(record?.downloadedChapterKeys || []),
+    ...collectArchiveDownloadedKeys(key),
+  ]);
+  return expectedNumbers.filter((number) => !downloaded.has(number));
+}
+
+function rememberSeriesDiscovery({ key, url, title, chapterNumbers }) {
+  if (!key) return null;
+  const record = getSeriesRecord(key) || {
+    key,
+    expectedChapterKeys: [],
+    knownChapterKeys: [],
+    downloadedChapterKeys: [],
+  };
+  if (url) record.url = url;
+  if (title) record.title = title;
+  record.expectedChapterKeys = uniqueChapterNumbers([
+    ...(record.expectedChapterKeys || []),
+    ...(chapterNumbers || []),
+  ]);
+  record.lastSyncAt = Date.now();
+  return upsertSeriesRecord(record);
+}
+
+function rememberSeriesStart(payload, expectedChapterKeys) {
+  const key = payload.seriesKey || seriesKeyFromUrl(payload.url);
+  if (!key) return;
+  const record = getSeriesRecord(key) || {
+    key,
+    expectedChapterKeys: [],
+    knownChapterKeys: [],
+    downloadedChapterKeys: [],
+  };
+  record.url = payload.url || record.url;
+  record.expectedChapterKeys = uniqueChapterNumbers([
+    ...(record.expectedChapterKeys || []),
+    ...(expectedChapterKeys || []),
+  ]);
+  record.knownChapterKeys = uniqueChapterNumbers([
+    ...(record.knownChapterKeys || []),
+    ...(payload.includeChapterKeys || []),
+  ]);
+  record.settings = { ...settings };
+  if (payload.coverToken) record.coverToken = payload.coverToken;
+  else if (payload.coverUrl) record.coverToken = null;
+  if (payload.coverUrl) record.coverUrl = payload.coverUrl;
+  record.lastSyncAt = Date.now();
+  upsertSeriesRecord(record);
+}
+
+function updateSeriesFromSnapshot(snap) {
+  const key = snap.seriesKey || seriesKeyFromUrl(jobs.get(snap.id)?.url || urlInput.value);
+  if (!key) return;
+  const chapters = snap.chapters || [];
+  const allNumbers = chapters.map((chapter) => chapter.number ?? chapter.chapter);
+  const doneNumbers = chapters
+    .filter((chapter) => chapter.status === "done")
+    .map((chapter) => chapter.number ?? chapter.chapter);
+  const record = getSeriesRecord(key) || {
+    key,
+    expectedChapterKeys: [],
+    knownChapterKeys: [],
+    downloadedChapterKeys: [],
+  };
+  record.url = record.url || jobs.get(snap.id)?.url || urlInput.value;
+  record.title = snap.title || record.title;
+  record.expectedChapterKeys = uniqueChapterNumbers([
+    ...(record.expectedChapterKeys || []),
+    ...allNumbers,
+  ]);
+  record.knownChapterKeys = uniqueChapterNumbers([
+    ...(record.knownChapterKeys || []),
+    ...allNumbers,
+  ]);
+  record.downloadedChapterKeys = uniqueChapterNumbers([
+    ...(record.downloadedChapterKeys || []),
+    ...doneNumbers,
+  ]);
+  record.lastSyncAt = Date.now();
+  upsertSeriesRecord(record);
+}
+
+function showTemporaryDetailStatus(message) {
+  if (!detailMeta || progressBox.classList.contains("hidden")) return;
+  const previous = detailMeta.textContent;
+  detailMeta.textContent = message;
+  setTimeout(() => {
+    if (detailMeta.textContent === message) detailMeta.textContent = previous;
+  }, 3500);
+}
+
+function renderDetailGaps(snap, url) {
+  if (!detailGapsBox) return;
+  const key = snap.seriesKey || seriesKeyFromUrl(url);
+  const chapters = (snap.chapters || []).map((chapter) => chapter.number ?? chapter.chapter);
+  const expected = uniqueChapterNumbers([...(getSeriesRecord(key)?.expectedChapterKeys || []), ...chapters]);
+  const gaps = key ? seriesGapsFor(key, expected) : [];
+  currentDetailGapKeys = gaps;
+  if (gaps.length === 0) {
+    detailGapsText.textContent = "";
+    hide(detailGapsBox);
+    return;
+  }
+  detailGapsText.textContent = `Missing ${gaps.length} chapter${gaps.length === 1 ? "" : "s"}: ${gaps.slice(0, 12).join(", ")}${gaps.length > 12 ? "…" : ""}`;
+  show(detailGapsBox);
+}
+
 function setCoverApplyStatus(message, applied = false) {
   coverApplyStatus.textContent = message;
   coverApplyStatus.classList.toggle("applied", applied);
@@ -404,12 +662,68 @@ function applyCoverUrl() {
   clearError();
   const detected = reviewState.detectedCoverUrl || "";
   reviewState.appliedCoverUrl = value && value !== detected ? value : null;
+  reviewState.coverToken = null;
+  if (coverPreview) coverPreview.classList.add("hidden");
+  if (coverUploadStatus) {
+    coverUploadStatus.textContent = "";
+    coverUploadStatus.classList.remove("applied");
+  }
   if (value) {
     setCoverApplyStatus(value === detected ? "Detected cover applied" : "Cover applied", true);
   } else {
     setCoverApplyStatus(detected ? "Using detected cover" : "No cover", Boolean(detected));
   }
   syncActiveDraft();
+}
+
+async function uploadCoverFile(file) {
+  if (!reviewState || !file) return;
+  if (!/^image\/(jpeg|png|webp)$/i.test(file.type)) {
+    setError("Choose a JPG, PNG, or WebP cover image.");
+    return;
+  }
+  if (file.size > COVER_UPLOAD_MAX_BYTES) {
+    setError("Cover image must be 5 MB or smaller.");
+    return;
+  }
+  clearError();
+  if (coverUploadStatus) coverUploadStatus.textContent = "Uploading…";
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error("Could not read that image."));
+      reader.readAsDataURL(file);
+    });
+    const res = await fetch("/api/covers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataUrl }),
+    });
+    const body = await readJson(res);
+    if (!res.ok) {
+      setError(body.error || "Could not upload the cover image.");
+      if (coverUploadStatus) coverUploadStatus.textContent = "";
+      return;
+    }
+    reviewState.coverToken = body.coverToken;
+    reviewState.appliedCoverUrl = null;
+    reviewCoverUrlInput.value = "";
+    if (coverPreview) {
+      coverPreview.src = dataUrl;
+      coverPreview.classList.remove("hidden");
+    }
+    if (coverUploadStatus) {
+      coverUploadStatus.textContent = "Cover uploaded";
+      coverUploadStatus.classList.add("applied");
+    }
+    setCoverApplyStatus("Local cover applied", true);
+    syncActiveDraft();
+  } catch (err) {
+    debugClient("error", `Cover upload failed: ${err.message}`);
+    setError("Could not upload the cover image.");
+    if (coverUploadStatus) coverUploadStatus.textContent = "";
+  }
 }
 
 function extractReviewChapterNumber(url) {
@@ -609,7 +923,7 @@ function addReviewChapter(event) {
   renderReviewChapters();
 }
 
-function readChapterRange() {
+function readChapterRange(values = settings) {
   const parse = (value, label) => {
     if (value === undefined || value === null || String(value).trim() === "") return null;
     const n = Number(value);
@@ -618,29 +932,32 @@ function readChapterRange() {
     }
     return n;
   };
-  const startChapter = parse(settings.startChapter, "Start chapter");
-  const endChapter = parse(settings.endChapter, "End chapter");
+  const startChapter = parse(values.startChapter, "Start chapter");
+  const endChapter = parse(values.endChapter, "End chapter");
   if (startChapter !== null && endChapter !== null && startChapter > endChapter) {
     throw new Error("Start chapter cannot be greater than end chapter.");
   }
   return { startChapter, endChapter };
 }
 
-function requestBody(extra = {}) {
-  const range = readChapterRange();
+function requestBody(extra = {}, values = settings) {
+  const normalized = normalizedSettings(values);
+  const range = readChapterRange(normalized);
   return {
     ...range,
     settings: {
-      concurrency: settings.concurrency,
-      delay: settings.delay,
-      globalThrottleProfile: settings.globalThrottleProfile || "balanced",
-      chapterHyperlinks: settings.chapterHyperlinks !== false,
+      concurrency: normalized.concurrency,
+      delay: normalized.delay,
+      globalThrottleProfile: normalized.globalThrottleProfile,
+      chapterHyperlinks: normalized.chapterHyperlinks,
+      exportFormat: normalized.exportFormat,
+      imageResolutionScale: normalized.imageResolutionScale,
     },
     ...extra,
   };
 }
 
-function buildScrapePayload() {
+function buildScrapePayload(overrides = {}) {
   if (!reviewState || !reviewState.token) {
     throw new Error("This chapter preview expired. Search again.");
   }
@@ -655,6 +972,8 @@ function buildScrapePayload() {
         label: chapter.label,
       })),
     coverUrl: reviewState.appliedCoverUrl || reviewState.detectedCoverUrl || undefined,
+    coverToken: reviewState.coverToken || undefined,
+    ...overrides,
   };
   if (sourceState) {
     extra.sourceOrder = [...sourceState.order];
@@ -695,6 +1014,15 @@ function resetComposer() {
   reviewListBox.innerHTML = "";
   reviewCoverUrlInput.value = "";
   setCoverApplyStatus("", false);
+  if (coverFileInput) coverFileInput.value = "";
+  if (coverPreview) {
+    coverPreview.removeAttribute("src");
+    coverPreview.classList.add("hidden");
+  }
+  if (coverUploadStatus) {
+    coverUploadStatus.textContent = "";
+    coverUploadStatus.classList.remove("applied");
+  }
   pendingDiscovery = null;
   reviewState = null;
   sourceState = null;
@@ -709,6 +1037,8 @@ function resetDetailState() {
   hide(downloadBox);
   hide(jobActionsBox);
   hide(retryBox);
+  hide(resumeBox);
+  hide(detailGapsBox);
   hide(progressBox);
   stats.innerHTML = "";
   detailTitle.textContent = "";
@@ -804,6 +1134,46 @@ function maxChapterNumber(snap) {
   return snap.totalChapters || 0;
 }
 
+function detailDownloads(snap) {
+  const fallbackPartial = Boolean(snap?.partialDownload);
+  const result = {};
+  const add = (format, url, partial) => {
+    const normalized = String(format || "pdf").toLowerCase();
+    if (!url || !["pdf", "cbz"].includes(normalized) || result[normalized]) return;
+    result[normalized] = { url, partial: Boolean(partial) };
+  };
+  if (Array.isArray(snap?.downloads)) {
+    for (const entry of snap.downloads) {
+      if (typeof entry === "string") add("pdf", entry, fallbackPartial);
+      else add(entry?.format, entry?.url, entry?.partial ?? fallbackPartial);
+    }
+  } else if (snap?.downloads && typeof snap.downloads === "object") {
+    for (const [format, entry] of Object.entries(snap.downloads)) {
+      if (typeof entry === "string") add(format, entry, fallbackPartial);
+      else add(format || entry?.format, entry?.url, entry?.partial ?? fallbackPartial);
+    }
+  }
+  add("pdf", snap?.downloadUrl, snap?.partialDownload);
+  return result;
+}
+
+function downloadLabel(format, partial) {
+  const name = format === "cbz" ? "CBZ" : "PDF";
+  return `${partial ? "Download partial " : "Download "}${name}`;
+}
+
+function downloadActionHtml(downloads, attribute, id, className) {
+  const links = [];
+  for (const format of ["pdf", "cbz"]) {
+    const entry = downloads[format];
+    if (!entry) continue;
+    links.push(
+      `<a class="${className}" href="${escapeHtml(entry.url)}" data-${attribute}="${escapeHtml(id)}" data-format="${format}" download>${downloadLabel(format, entry.partial)}</a>`,
+    );
+  }
+  return links.join("");
+}
+
 function renderDetail(snap, state, { archived = false } = {}) {
   show(progressBox);
   const total = snap.totalChapters || 0;
@@ -854,12 +1224,23 @@ function renderDetail(snap, state, { archived = false } = {}) {
   renderChapters(snap.chapters || [], snap.currentChapter);
   renderLog(snap.log, state);
 
-  if (snap.downloadUrl) {
+  const downloads = detailDownloads(snap);
+  if (downloads.pdf || downloads.cbz) {
     show(downloadBox);
-    downloadLink.href = snap.downloadUrl;
-    downloadLink.textContent = snap.partialDownload ? "Download partial PDF" : "Download PDF";
+    for (const [format, link] of [["pdf", downloadLink], ["cbz", downloadCbzLink]]) {
+      if (!link) continue;
+      if (downloads[format]) {
+        link.href = downloads[format].url;
+        link.textContent = downloadLabel(format, downloads[format].partial);
+        show(link);
+      } else {
+        hide(link);
+      }
+    }
   } else {
     hide(downloadBox);
+    if (downloadLink) hide(downloadLink);
+    if (downloadCbzLink) hide(downloadCbzLink);
   }
 
   if (!archived && snap.status === "running") {
@@ -869,13 +1250,33 @@ function renderDetail(snap, state, { archived = false } = {}) {
     hide(jobActionsBox);
   }
 
-  if (!archived && snap.status === "complete" && snap.retryable?.length > 0) {
+  if (!archived && snap.status === "failed" && snap.resumable) {
+    show(resumeBox);
+    resumeBtn.textContent = snap.phase === "interrupted"
+      ? "Resume after restart"
+      : "Resume from last completed chapter";
+  } else {
+    hide(resumeBox);
+  }
+
+  if (!archived && snap.status === "complete" && (snap.tempCleaned || snap.retryable?.length > 0)) {
     show(retryBox);
     retryBtn.textContent = snap.tempCleaned
       ? "Rebuild PDF from source"
       : `Retry ${snap.retryable.length} failed chapter(s)`;
   } else {
     hide(retryBox);
+  }
+
+  const detailUrl = archived
+    ? archiveRecord(activeArchiveId)?.url || urlInput.value
+    : jobs.get(activeJobId)?.url || urlInput.value;
+  if (snap.status === "complete" || snap.status === "failed") {
+    renderDetailGaps(snap, detailUrl);
+  } else {
+    currentDetailGapKeys = [];
+    if (detailGapsText) detailGapsText.textContent = "";
+    if (detailGapsBox) hide(detailGapsBox);
   }
 }
 
@@ -1020,6 +1421,13 @@ async function startScrape(firstChapterUrl, { auto = false } = {}) {
     };
     reviewCoverUrlInput.value = detectedCoverUrl;
     setCoverApplyStatus(detectedCoverUrl ? "Detected cover applied" : "No cover found", Boolean(detectedCoverUrl));
+    const seriesKey = seriesKeyFromUrl(url);
+    rememberSeriesDiscovery({
+      key: seriesKey,
+      url,
+      title: result.title || hostLabel(url),
+      chapterNumbers: result.chapterNumbers || result.chapters.map((chapter) => chapter.number),
+    });
     for (const line of result.log || []) debugClient("info", `discovery: ${line}`);
 
     if ((result.providers || []).length > 0) {
@@ -1120,6 +1528,8 @@ function sanitizeArchiveDetail(snap) {
     kind: snap.kind || null,
     status: snap.status || null,
     phase: snap.phase || null,
+    resumable: Boolean(snap.resumable),
+    seriesKey: snap.seriesKey || null,
     paused: Boolean(snap.paused),
     userPaused: Boolean(snap.userPaused),
     currentChapter: snap.currentChapter ?? null,
@@ -1134,6 +1544,8 @@ function sanitizeArchiveDetail(snap) {
     locked: snap.locked ?? 0,
     downloadUrl: snap.downloadUrl || null,
     partialDownload: Boolean(snap.partialDownload),
+    downloads: cloneValue(snap.downloads),
+    settings: snap.settings ? { ...snap.settings } : null,
     retryable: Array.isArray(snap.retryable) ? snap.retryable.slice(0, 100) : [],
     tempCleaned: Boolean(snap.tempCleaned),
     finishedAt: snap.finishedAt || null,
@@ -1165,6 +1577,7 @@ function sanitizeArchiveReview(state) {
     overrides: { ...(state.overrides || {}) },
     detectedCoverUrl: state.detectedCoverUrl || null,
     appliedCoverUrl: state.appliedCoverUrl || null,
+    coverToken: state.coverToken || null,
   };
 }
 
@@ -1184,6 +1597,7 @@ function archivePayloadFromDraft(draft) {
   const payload = {
     ...draft.settings,
     url: draft.url,
+    seriesKey: draft.seriesKey || seriesKeyFromUrl(draft.url),
     settings: { ...draft.settings },
   };
   if (draft.review) {
@@ -1196,6 +1610,7 @@ function archivePayloadFromDraft(draft) {
         label: chapter.label,
       }));
     payload.coverUrl = draft.review.appliedCoverUrl || draft.review.detectedCoverUrl || undefined;
+    if (draft.review.coverToken) payload.coverToken = draft.review.coverToken;
   }
   if (draft.sources) {
     payload.sourceOrder = [...(draft.sources.order || [])];
@@ -1246,9 +1661,11 @@ function captureArchiveStart(jobId, payload, draft) {
       : draft?.title || draftTitleFromUrl(url),
     status: "queued",
     kind: pendingDiscovery?.detectedKind || "generic",
+    seriesKey: payload.seriesKey || seriesKeyFromUrl(url),
     createdAt: Date.now(),
     finishedAt: null,
     downloadUrl: null,
+    downloads: null,
     settings: { ...DEFAULT_SETTINGS, ...settings },
     startChapter: payload.startChapter ?? settings.startChapter ?? null,
     endChapter: payload.endChapter ?? settings.endChapter ?? null,
@@ -1272,9 +1689,12 @@ function updateArchiveFromSnapshot(snap) {
   record.title = snap.title || record.title || "Untitled export";
   record.status = snap.status || record.status;
   record.kind = snap.kind || record.kind;
+  record.seriesKey = snap.seriesKey || record.detail?.seriesKey || record.seriesKey || seriesKeyFromUrl(record.url);
+  if (snap.settings) record.settings = normalizedSettings(snap.settings);
   record.paused = Boolean(snap.paused);
   record.detail = sanitizeArchiveDetail(snap);
   record.downloadUrl = snap.downloadUrl || record.downloadUrl || null;
+  record.downloads = cloneValue(snap.downloads) || record.downloads || null;
   record.totalChapters = snap.totalChapters ?? record.totalChapters;
   if ((snap.status === "complete" || snap.status === "failed") && !record.finishedAt) {
     record.finishedAt = snap.finishedAt || Date.now();
@@ -1282,9 +1702,16 @@ function updateArchiveFromSnapshot(snap) {
   upsertArchiveRecord(record);
 }
 
-function archiveDownloadValid(record) {
+function archiveDownloadUrl(record, format = "pdf") {
+  const downloads = detailDownloads(record.detail || record);
+  return downloads[format]?.url || null;
+}
+
+function archiveDownloadValid(record, format = "pdf") {
   return Boolean(
-    record.downloadUrl && record.finishedAt && Date.now() - record.finishedAt < ARCHIVE_TTL_MS,
+    archiveDownloadUrl(record, format) &&
+      record.finishedAt &&
+      Date.now() - record.finishedAt < ARCHIVE_TTL_MS,
   );
 }
 
@@ -1307,17 +1734,20 @@ async function archiveJob(id, { pause = false } = {}) {
     }
   }
   const snap = state.snap;
+  const url = state.draft ? state.url || "" : "";
   const record = archiveRecord(id) || {
     id,
     title: snap?.title || state.title || "Untitled export",
-    url: state.draft ? state.url || "" : "",
+    url,
     status: snap?.status || state.status || "draft",
     kind: snap?.kind || null,
+    seriesKey: snap?.seriesKey || state.seriesKey || seriesKeyFromUrl(url),
     createdAt: snap?.createdAt || state.createdAt || Date.now(),
     finishedAt: snap?.status === "complete" || snap?.status === "failed"
       ? snap.finishedAt || Date.now()
       : null,
     downloadUrl: snap?.downloadUrl || null,
+    downloads: cloneValue(snap?.downloads),
     paused: pausedByArchive || Boolean(snap?.paused),
     detail: sanitizeArchiveDetail(snap),
     totalChapters: snap?.totalChapters || state.chapterCount || 0,
@@ -1330,6 +1760,8 @@ async function archiveJob(id, { pause = false } = {}) {
     record.title = snap.title || record.title;
     record.status = snap.status;
     record.downloadUrl = snap.downloadUrl || record.downloadUrl;
+    record.downloads = cloneValue(snap.downloads) || record.downloads || null;
+    if (snap.settings) record.settings = normalizedSettings(snap.settings);
     record.paused = pausedByArchive || Boolean(snap.paused);
     record.detail = sanitizeArchiveDetail(snap);
     record.totalChapters = snap.totalChapters ?? record.totalChapters;
@@ -1365,6 +1797,7 @@ function openArchivedJob(id) {
   draft.settings = normalizedSettings(record.settings);
   draft.review = cloneValue(record.review);
   draft.sources = hydrateSources(record.sources);
+  draft.seriesKey = record.seriesKey || record.detail?.seriesKey || seriesKeyFromUrl(draft.url);
   draft.coverUrl = record.review?.appliedCoverUrl || record.review?.detectedCoverUrl || null;
   draft.chapterCount = record.totalChapters || record.review?.chapters?.length || 0;
   draft.detail = cloneValue(record.detail);
@@ -1375,6 +1808,11 @@ function openArchivedJob(id) {
 }
 
 function deleteArchivedJob(id) {
+  const record = archiveRecord(id);
+  if (record) {
+    archiveDiscoveryCache.delete(archiveCacheKey(record));
+    archiveDiscoveryCache.delete(record.id);
+  }
   persistArchive(loadArchive().filter((record) => record.id !== id));
   for (const state of jobs.values()) {
     if (state.archivedFrom === id) state.archivedFrom = null;
@@ -1398,9 +1836,94 @@ function closeArchiveDeleteModal() {
   hide(archiveDeleteModal);
 }
 
+function archiveCacheKey(record) {
+  return record.seriesKey || record.detail?.seriesKey || seriesKeyFromUrl(record.url) || record.id;
+}
+
+function expectedKeysFromDiscovery(result) {
+  const values = result?.chapterNumbers?.length
+    ? result.chapterNumbers
+    : (result?.chapters || []).map((chapter) => chapter.number ?? chapter.chapter);
+  return uniqueChapterNumbers(values);
+}
+
+function archiveUpdateKeys(record, key, result) {
+  const expected = expectedKeysFromDiscovery(result);
+  const current = getSeriesRecord(key);
+  const downloaded = new Set([
+    ...(current?.downloadedChapterKeys || []),
+    ...collectArchiveDownloadedKeys(key),
+  ]);
+  const known = new Set([...(current?.knownChapterKeys || []), ...downloaded]);
+  const gaps = seriesGapsFor(key, expected);
+  return uniqueChapterNumbers([...expected.filter((number) => !known.has(number)), ...gaps]);
+}
+
+function drainArchiveDiscoveryQueue() {
+  while (archiveDiscoveryActive < ARCHIVE_DISCOVERY_MAX && archiveDiscoveryQueue.length > 0) {
+    const task = archiveDiscoveryQueue.shift();
+    archiveDiscoveryActive += 1;
+    task();
+  }
+}
+
+function queueArchiveDiscoveryCheck(cacheKey, record, key) {
+  if (archiveDiscoveryCache.has(cacheKey)) return;
+  archiveDiscoveryCache.set(cacheKey, {
+    state: "checking",
+    checkedAt: Date.now(),
+    newKeys: [],
+    discoveryResult: null,
+  });
+  const task = async () => {
+    try {
+      if (!archiveRecord(record.id)) return;
+      const res = await fetch("/api/discover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody({ url: record.url }, updateSettings(record.settings))),
+      });
+      const result = await readJson(res);
+      if (!res.ok) throw new Error(result.error || `HTTP ${res.status}`);
+      const newKeys = archiveUpdateKeys(record, key, result);
+      archiveDiscoveryCache.set(cacheKey, {
+        state: newKeys.length ? "available" : "upToDate",
+        checkedAt: Date.now(),
+        newKeys,
+        discoveryResult: result,
+      });
+    } catch (err) {
+      archiveDiscoveryCache.set(cacheKey, {
+        state: "error",
+        checkedAt: Date.now(),
+        newKeys: [],
+        discoveryResult: null,
+      });
+      debugClient("warn", `Archive update check failed for ${record.title || record.id}: ${err.message}`);
+    } finally {
+      archiveDiscoveryActive -= 1;
+      renderArchive();
+      drainArchiveDiscoveryQueue();
+    }
+  };
+  if (archiveDiscoveryActive < ARCHIVE_DISCOVERY_MAX) {
+    archiveDiscoveryActive += 1;
+    task();
+  } else {
+    archiveDiscoveryQueue.push(task);
+  }
+}
+
 function renderArchive() {
   if (!archiveListBox) return;
   const records = loadArchive();
+  if (lastArchiveRenderCount !== null && records.length > lastArchiveRenderCount) {
+    if (archiveToggle && archiveListBox.classList.contains("hidden")) {
+      show(archiveListBox);
+      archiveToggle.setAttribute("aria-expanded", "true");
+    }
+  }
+  lastArchiveRenderCount = records.length;
   if (archiveCount) archiveCount.textContent = String(records.length);
   if (records.length === 0) {
     archiveListBox.innerHTML = '<div class="jobs-empty">No archived jobs yet.</div>';
@@ -1427,14 +1950,36 @@ function renderArchive() {
             ? "paused"
             : "";
     const actions = [];
-    if (archiveDownloadValid(record)) {
+    const downloads = detailDownloads(record.detail || record);
+    for (const format of ["pdf", "cbz"]) {
+      if (!archiveDownloadValid(record, format)) continue;
       actions.push(
-        `<a class="archive-row-download" href="${escapeHtml(record.downloadUrl)}" data-archive-download="${escapeHtml(record.id)}" download>Download PDF</a>`,
+        `<a class="archive-row-download" href="${escapeHtml(downloads[format].url)}" data-archive-download="${escapeHtml(record.id)}" data-format="${format}" download>${downloadLabel(format, downloads[format].partial)}</a>`,
       );
-    } else if (record.url) {
+    }
+    if (!archiveDownloadValid(record) && record.url) {
       actions.push(
         `<button type="button" class="archive-row-rerun" data-archive-rerun="${escapeHtml(record.id)}">Rerun</button>`,
       );
+    }
+    const terminal = record.status === "complete" || record.status === "failed";
+    let updateKey = null;
+    if (terminal && record.url) {
+      updateKey = archiveCacheKey(record);
+      const cached = archiveDiscoveryCache.get(updateKey);
+      if (!cached || Date.now() - cached.checkedAt >= ARCHIVE_DISCOVERY_TTL_MS) {
+        queueArchiveDiscoveryCheck(updateKey, record, updateKey);
+      }
+      const current = archiveDiscoveryCache.get(updateKey);
+      if (current?.state === "available" && current.newKeys.length > 0) {
+        actions.push(
+          `<button type="button" class="archive-row-rerun" data-archive-update="${escapeHtml(record.id)}" title="Download ${current.newKeys.length} new chapter${current.newKeys.length === 1 ? "" : "s"}">Update</button>`,
+        );
+      } else if (current?.state === "checking") {
+        actions.push('<span class="archive-row-hint">Checking…</span>');
+      } else if (current?.state === "upToDate") {
+        actions.push('<span class="archive-row-hint">Up to date</span>');
+      }
     }
     actions.push(
       `<button type="button" class="archive-row-delete" data-archive-delete="${escapeHtml(record.id)}" aria-label="Delete archived job" title="Delete archived job">×</button>`,
@@ -1465,6 +2010,28 @@ function renderArchive() {
     });
     button.addEventListener("keydown", (event) => event.stopPropagation());
   }
+  for (const button of archiveListBox.querySelectorAll("[data-archive-update]")) {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const record = archiveRecord(button.dataset.archiveUpdate);
+      if (!record) return;
+      const key = record.seriesKey || record.detail?.seriesKey || seriesKeyFromUrl(record.url);
+      const cacheKey = archiveCacheKey(record);
+      const cached = archiveDiscoveryCache.get(cacheKey);
+      const options = {
+        title: record.title,
+        seriesKey: key,
+        settings: record.settings,
+        archiveCacheKey: cacheKey,
+      };
+      if (cached?.state === "available" && cached.discoveryResult && cached.newKeys.length > 0) {
+        options.discoveryResult = cached.discoveryResult;
+        options.includeKeys = cached.newKeys;
+      }
+      updateSeries(record.url, options);
+    });
+    button.addEventListener("keydown", (event) => event.stopPropagation());
+  }
   for (const button of archiveListBox.querySelectorAll("[data-archive-delete]")) {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -1485,6 +2052,7 @@ function rerunArchivedJob(id) {
   if (autoDiscoverTimer) clearTimeout(autoDiscoverTimer);
   const draft = createDraftJob({ select: true });
   draft.url = record.url;
+  draft.seriesKey = record.seriesKey || record.detail?.seriesKey || seriesKeyFromUrl(record.url);
   draft.settings = { ...DEFAULT_SETTINGS, ...(record.settings || {}) };
   draft.title = record.title || draftTitleFromUrl(record.url);
   urlInput.value = record.url;
@@ -1523,7 +2091,11 @@ function applyArchiveRerun() {
       }
     }
     const cover = rerun.review.appliedCoverUrl || rerun.payload?.coverUrl;
-    if (cover && isValidHttpUrl(cover)) {
+    if (rerun.review.coverToken || rerun.payload?.coverToken) {
+      reviewState.coverToken = rerun.review.coverToken || rerun.payload.coverToken;
+      setCoverApplyStatus("Saved cover upload applied", true);
+      if (coverUploadStatus) coverUploadStatus.textContent = "Saved cover upload applied";
+    } else if (cover && isValidHttpUrl(cover)) {
       reviewState.appliedCoverUrl = cover;
       reviewCoverUrlInput.value = cover;
       setCoverApplyStatus("Cover applied", true);
@@ -1563,6 +2135,7 @@ function serializeDraft(state) {
     draft: true,
     title: state.title || "New Job",
     url: state.url || "",
+    seriesKey: state.seriesKey || seriesKeyFromUrl(state.url),
     settings: { ...state.settings },
     discovery: cloneValue(state.discovery),
     review: cloneValue(state.review),
@@ -1616,6 +2189,7 @@ function createDraftJob({ select = true } = {}) {
     status: "draft",
     title: "New Job",
     url: "",
+    seriesKey: null,
     settings: { ...DEFAULT_SETTINGS },
     discovery: null,
     review: null,
@@ -1642,6 +2216,7 @@ function syncActiveDraft() {
   const draft = activeDraft();
   if (!draft) return;
   draft.url = urlInput.value.trim();
+  draft.seriesKey = draft.seriesKey || seriesKeyFromUrl(draft.url);
   draft.discovery = cloneValue(pendingDiscovery);
   draft.review = cloneValue(reviewState);
   draft.sources = serializeSources(sourceState);
@@ -1687,6 +2262,10 @@ function hydrateDraftIntoComposer(state) {
   detectedKind.textContent = kindLabel(pendingDiscovery?.detectedKind);
   show(detectedBox);
   reviewCoverUrlInput.value = reviewState.appliedCoverUrl || reviewState.detectedCoverUrl || "";
+  if (reviewState.coverToken) {
+    setCoverApplyStatus("Saved cover upload applied", true);
+    if (coverUploadStatus) coverUploadStatus.textContent = "Saved cover upload applied";
+  }
   renderReviewChapters();
   show(sourcesPanel);
   if (sourceState) {
@@ -1848,11 +2427,13 @@ function renderJobsList() {
         ? Math.min(1, (snap.completedChapters || 0) / snap.totalChapters) * 100
         : 0;
       showBar = status === "running";
-      if (snap?.downloadUrl) {
-        actions.push(`<a class="job-row-download" href="${escapeHtml(snap.downloadUrl)}" data-download="${escapeHtml(id)}">Download PDF</a>`);
-      }
+      const jobDownloads = detailDownloads(snap);
+      actions.push(downloadActionHtml(jobDownloads, "download", id, "job-row-download"));
       if (status === "running") {
         actions.push(`<button type="button" class="job-row-pause" data-pause="${escapeHtml(id)}">${snap?.userPaused ? "Resume" : "Pause"}</button>`);
+      }
+      if (status === "failed" && snap?.resumable) {
+        actions.push(`<button type="button" class="job-row-pause" data-resume="${escapeHtml(id)}">Resume</button>`);
       }
     }
 
@@ -1883,6 +2464,13 @@ function renderJobsList() {
       event.stopPropagation();
       if (activeJobId !== button.dataset.pause) selectJob(button.dataset.pause);
       await toggleJobPause();
+    });
+  }
+  for (const button of jobsListBox.querySelectorAll("[data-resume]")) {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      if (activeJobId !== button.dataset.resume) selectJob(button.dataset.resume);
+      await continueJob(button.dataset.resume);
     });
   }
   for (const link of jobsListBox.querySelectorAll("[data-download]")) {
@@ -1936,6 +2524,7 @@ function handleSnapshot(snap) {
   const previousStatus = state.status;
   state.snap = snap;
   state.status = snap.status;
+  updateSeriesFromSnapshot(snap);
   updateArchiveFromSnapshot(snap);
   if (previousStatus !== "failed" && snap.status === "failed") {
     setError(snap.error || "Job failed.");
@@ -2053,6 +2642,7 @@ async function startJob(payload) {
   const draftState = draftId ? jobs.get(draftId) : null;
   startBtn.disabled = true;
   startBtn.textContent = "Starting…";
+  let started = false;
 
   try {
     const res = await fetch("/api/scrape", {
@@ -2074,12 +2664,17 @@ async function startJob(payload) {
     hide(firstChapterBox);
     hide(sourcesPanel);
     const id = body.jobId;
+    rememberSeriesStart(
+      payload,
+      pendingDiscovery?.chapterNumbers || payload.includeChapterKeys || [],
+    );
     captureArchiveStart(id, payload, draftState);
     if (draftId && jobs.get(draftId)?.draft) convertDraftToServerJob(draftId, id);
     else jobState(id);
     selectJob(id);
     await fetchJobSnapshot(id);
     ensurePolling();
+    started = true;
   } catch (err) {
     const draft = draftId ? jobs.get(draftId) : null;
     if (draft?.draft) {
@@ -2093,6 +2688,7 @@ async function startJob(payload) {
     startBtn.disabled = false;
     startBtn.textContent = "Find chapters";
   }
+  return started;
 }
 
 async function pollDebug() {
@@ -2260,31 +2856,227 @@ function renderChapterSourceList() {
   syncActiveDraft();
 }
 
-async function retryJob() {
-  if (!activeJobId) return;
-  retryBtn.disabled = true;
-  retryBtn.textContent = "Retrying…";
+async function updateSeries(urlOverride, options = {}) {
+  const url = (urlOverride || urlInput.value).trim();
+  if (!url) {
+    setError("Paste a series link first.");
+    return;
+  }
+  const key = options.seriesKey || seriesKeyFromUrl(url);
+  const values = updateSettings(options.settings || settings);
+  if (options.settings) {
+    settings = values;
+    draftSettings = { ...values };
+    renderSettings();
+  }
+  const record = getSeriesRecord(key) || {
+    key,
+    url,
+    title: options.title || draftTitleFromUrl(url),
+    expectedChapterKeys: [],
+    knownChapterKeys: [],
+    downloadedChapterKeys: [],
+  };
+  if (autoDiscoverTimer) clearTimeout(autoDiscoverTimer);
+  const generation = ++discoveryGeneration;
+  archiveRerun = null;
+  activeArchiveId = null;
+  clearError();
+  debugClient("info", `Checking for new chapters: ${url}`);
   try {
-    const res = await fetch(`/api/jobs/${activeJobId}/retry`, { method: "POST" });
-    const body = await res.json();
+    let result = options.discoveryResult || null;
+    if (!result) {
+      const res = await fetch("/api/discover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody({ url }, values)),
+      });
+      result = await readJson(res);
+      if (generation !== discoveryGeneration) return;
+      if (!res.ok) {
+        handleErrorResponse(res, result);
+        return;
+      }
+    }
+    if (generation !== discoveryGeneration) return;
+
+    const expected = expectedKeysFromDiscovery(result);
+    rememberSeriesDiscovery({
+      key,
+      url,
+      title: result.title || options.title || hostLabel(url),
+      chapterNumbers: expected,
+    });
+    const current = getSeriesRecord(key) || record;
+    const downloaded = new Set([
+      ...(current.downloadedChapterKeys || []),
+      ...collectArchiveDownloadedKeys(key),
+    ]);
+    const known = new Set([...(current.knownChapterKeys || []), ...downloaded]);
+    const gaps = seriesGapsFor(key, expected);
+    const newKeys = options.includeKeys
+      ? uniqueChapterNumbers(options.includeKeys)
+      : uniqueChapterNumbers([
+          ...expected.filter((number) => !known.has(number)),
+          ...gaps,
+        ]);
+
+    if (newKeys.length === 0) {
+      const message = `No new chapters found${options.title ? ` for ${options.title}` : ""}`;
+      debugClient("info", message);
+      showTemporaryDetailStatus("Already up to date");
+      return;
+    }
+
+    debugClient("info", `Starting ${newKeys.length} chapter${newKeys.length === 1 ? "" : "s"}…`);
+    const draft = createDraftJob({ select: true });
+    draft.url = url;
+    draft.seriesKey = key;
+    draft.settings = { ...values };
+    urlInput.value = url;
+    pendingDiscovery = result;
+    const detectedCoverUrl = isValidHttpUrl(result.coverUrl || "") ? result.coverUrl : "";
+    const savedCover = isValidHttpUrl(current.coverUrl || "") ? current.coverUrl : null;
+    reviewState = {
+      token: result.discoveryToken,
+      chapters: (result.chapters || []).map((chapter) => ({ ...chapter })),
+      overrides: {},
+      detectedCoverUrl,
+      appliedCoverUrl: savedCover,
+      coverToken: current.coverToken || null,
+    };
+    sourceState = null;
+    detectedKind.textContent = kindLabel(result.detectedKind);
+    show(detectedBox);
+    hide(firstChapterBox);
+    hide(sourceControls);
+    hide(sourcesAuto);
+    hide(sourcesPanel);
+    reviewCoverUrlInput.value = savedCover || detectedCoverUrl;
+    setCoverApplyStatus(
+      reviewState.coverToken
+        ? "Saved cover upload applied"
+        : savedCover
+          ? "Saved cover applied"
+          : detectedCoverUrl
+            ? "Detected cover applied"
+            : "No cover found",
+      Boolean(reviewState.coverToken || savedCover || detectedCoverUrl),
+    );
+    syncActiveDraft();
+
+    const payload = buildScrapePayload({ includeChapterKeys: newKeys, seriesKey: key });
+    const started = await startJob(payload);
+    if (started && options.archiveCacheKey) {
+      const cached = archiveDiscoveryCache.get(options.archiveCacheKey);
+      if (cached) {
+        cached.state = "upToDate";
+        cached.newKeys = [];
+        cached.checkedAt = Date.now();
+      }
+    }
+    if (started) {
+      debugClient("info", `Started ${newKeys.length} chapter${newKeys.length === 1 ? "" : "s"}`);
+    }
+  } catch (err) {
+    if (generation !== discoveryGeneration) return;
+    debugClient("error", `Series update failed: ${err.message}`);
+    setError("Network error while checking for new chapters.");
+  }
+}
+
+async function continueJob(id = activeJobId) {
+  if (!id) return;
+  resumeBtn.disabled = true;
+  resumeBtn.textContent = "Resuming…";
+  try {
+    const res = await fetch(`/api/jobs/${id}/continue`, { method: "POST" });
+    const body = await readJson(res);
     if (!res.ok) {
-      debugClient("error", `Retry responded ${res.status}: ${body.error || "unknown error"}`);
-      setError(body.error || "Could not retry.");
-      retryBtn.disabled = false;
-      retryBtn.textContent = "Retry failed chapters";
+      setError(body.error || "Could not resume that job.");
       return;
     }
     hide(downloadBox);
     hide(retryBox);
+    hide(resumeBox);
     clearError();
-    await fetchJobSnapshot(activeJobId);
-    selectJob(activeJobId);
+    await fetchJobSnapshot(id);
+    selectJob(id);
+    ensurePolling();
+  } catch (err) {
+    debugClient("error", `Resume request failed: ${err.message}`);
+    setError("Network error while resuming.");
+  } finally {
+    resumeBtn.disabled = false;
+    resumeBtn.textContent = "Resume from last completed chapter";
+  }
+}
+
+function openRetryModal() {
+  if (!activeJobId) return;
+  const snap = jobs.get(activeJobId)?.snap;
+  if (!snap) return;
+  if (snap.tempCleaned) {
+    retryJob([], true);
+    return;
+  }
+  const retryable = snap.retryable || [];
+  if (retryable.length === 0) return;
+  const chapters = snap.chapters || [];
+  retryListBox.innerHTML = retryable
+    .map((number) => {
+      const chapter = chapters.find(
+        (entry) => Number(entry.chapter) === Number(number) || Number(entry.number) === Number(number),
+      );
+      const label = chapter?.label ?? number;
+      const reason = chapter?.reason || "failed";
+      return `<label class="retry-row"><input type="checkbox" value="${escapeHtml(number)}" checked /><span>${escapeHtml(/^(chapter|prologue)\b/i.test(String(label)) ? label : `Chapter ${label}`)}<small>${escapeHtml(reason)}</small></span></label>`;
+    })
+    .join("");
+  show(retryModal);
+  retrySelectedBtn.focus();
+}
+
+function closeRetryModal() {
+  hide(retryModal);
+}
+
+async function retryJob(chapterKeys = null, rebuild = false) {
+  if (!activeJobId) return;
+  const jobId = activeJobId;
+  retryBtn.disabled = true;
+  retryBtn.textContent = "Retrying…";
+  retrySelectedBtn.disabled = true;
+  try {
+    const body = rebuild || !chapterKeys || chapterKeys.length === 0
+      ? undefined
+      : { chapterKeys };
+    const res = await fetch(`/api/jobs/${jobId}/retry`, {
+      method: "POST",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const result = await readJson(res);
+    if (!res.ok) {
+      debugClient("error", `Retry responded ${res.status}: ${result.error || "unknown error"}`);
+      setError(result.error || "Could not retry.");
+      return;
+    }
+    closeRetryModal();
+    hide(downloadBox);
+    hide(retryBox);
+    hide(resumeBox);
+    clearError();
+    await fetchJobSnapshot(jobId);
+    selectJob(jobId);
     ensurePolling();
   } catch (err) {
     debugClient("error", `Retry request failed: ${err.message}`);
     setError("Network error while retrying.");
+  } finally {
     retryBtn.disabled = false;
     retryBtn.textContent = "Retry failed chapters";
+    retrySelectedBtn.disabled = false;
   }
 }
 
@@ -2386,6 +3178,15 @@ sourcesCancel.addEventListener("click", () => {
   reviewListBox.innerHTML = "";
   reviewCoverUrlInput.value = "";
   setCoverApplyStatus("", false);
+  if (coverFileInput) coverFileInput.value = "";
+  if (coverPreview) {
+    coverPreview.removeAttribute("src");
+    coverPreview.classList.add("hidden");
+  }
+  if (coverUploadStatus) {
+    coverUploadStatus.textContent = "";
+    coverUploadStatus.classList.remove("applied");
+  }
   urlInput.value = "";
   pendingDiscovery = null;
   reviewState = null;
@@ -2415,10 +3216,41 @@ sourcesStart.addEventListener("click", () => {
   startJob(payload);
 });
 
-retryBtn.addEventListener("click", () => retryJob());
-downloadLink.addEventListener("click", () => {
-  if (activeJobId && !jobs.get(activeJobId)?.draft) archiveJob(activeJobId);
+retryBtn.addEventListener("click", () => openRetryModal());
+retryCancelBtn.addEventListener("click", () => closeRetryModal());
+retrySelectedBtn.addEventListener("click", () => {
+  const chapterKeys = [...retryListBox.querySelectorAll('input[type="checkbox"]:checked')].map((input) =>
+    Number(input.value),
+  );
+  if (chapterKeys.length === 0) {
+    setError("Select at least one chapter to retry.");
+    return;
+  }
+  retryJob(chapterKeys);
 });
+resumeBtn.addEventListener("click", () => continueJob());
+coverFileInput.addEventListener("change", () => {
+  const file = coverFileInput.files?.[0];
+  uploadCoverFile(file).finally(() => {
+    coverFileInput.value = "";
+  });
+});
+detailGapsBtn.addEventListener("click", () => {
+  if (!currentDetailGapKeys.length) return;
+  const snap = jobs.get(activeJobId)?.snap || archiveRecord(activeArchiveId)?.detail;
+  const url = archiveRecord(activeArchiveId)?.url || jobs.get(activeJobId)?.url || urlInput.value;
+  updateSeries(url, {
+    title: snap?.title || archiveRecord(activeArchiveId)?.title,
+    seriesKey: snap?.seriesKey || seriesKeyFromUrl(url),
+    settings: archiveRecord(activeArchiveId)?.settings,
+    includeKeys: currentDetailGapKeys,
+  });
+});
+for (const link of [downloadLink, downloadCbzLink]) {
+  link?.addEventListener("click", () => {
+    if (activeJobId && !jobs.get(activeJobId)?.draft) archiveJob(activeJobId);
+  });
+}
 debugClearBtn.addEventListener("click", () => {
   debugLogBox.innerHTML = "";
 });

@@ -8,6 +8,7 @@ const {
   logicalChapterNumber,
   inChapterRange,
   filterByChapterRange,
+  findChapterGaps,
 } = require("../src/chapterRange");
 
 test("normalizeChapterRange accepts blank bounds and validates whole numbers", () => {
@@ -51,4 +52,13 @@ test("filterByChapterRange keeps unbounded chapters and caps oversized ends", ()
     filterByChapterRange(items, (n) => n, { startChapter: 37, endChapter: 37 }, { logical: true }),
     [37, 37.1, 37.2],
   );
+});
+
+test("findChapterGaps compares logical chapter numbers within the discovered range", () => {
+  assert.deepStrictEqual(
+    findChapterGaps([1, 2, 3, 4, 5], [1, "2", 5]),
+    [3, 4],
+  );
+  assert.deepStrictEqual(findChapterGaps([1, 2], [1, 2, 3]), []);
+  assert.deepStrictEqual(findChapterGaps([], [1]), []);
 });
